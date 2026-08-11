@@ -7,7 +7,7 @@ from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.error import Forbidden
+from telegram.error import BadRequest, Forbidden
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -49,6 +49,31 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------
+# Xavfsiz tahrirlash — "Message is not modified" xatosi butun
+# botni yiqitib qo'ymasligi uchun (masalan bir xil tugma ketma-ket
+# bosilganda Telegram shu xatoni qaytaradi).
+# ---------------------------------------------------------
+async def safe_edit_text(message, text, **kwargs):
+    try:
+        await message.edit_text(text, **kwargs)
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
+
+
+async def safe_edit_markup(message, reply_markup=None):
+    try:
+        await message.edit_reply_markup(reply_markup=reply_markup)
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
+
+
+async def global_error_handler(update, context) -> None:
+    logger.error(f"Kutilmagan xato: {context.error}", exc_info=context.error)
 
 
 # ---------------------------------------------------------
@@ -164,7 +189,7 @@ async def show_main_menu(chat_id: int, bot, edit_message=None) -> None:
         "🧮 <b>Ball kalkulyatori</b> — to'plagan ballingiz asosida mos yo'nalishlarni bilib olasiz"
     )
     if edit_message:
-        await edit_message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await safe_edit_text(edit_message, text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
     else:
         await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
@@ -195,7 +220,7 @@ async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
     missing = await get_missing_channels(context.bot, chat_id)
     if missing:
         await query.answer("Hali barcha kanallarga obuna bo'lmadingiz ❌", show_alert=True)
-        await query.edit_message_reply_markup(reply_markup=build_subscription_keyboard(missing))
+        await safe_edit_markup(query.message, reply_markup=build_subscription_keyboard(missing))
         return
 
     await query.answer("Obuna tasdiqlandi ✅")
@@ -210,7 +235,7 @@ async def toggle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
         missing = await get_missing_channels(context.bot, chat_id)
         if missing:
             await query.answer("Avval kanallarga obuna bo'ling ❌", show_alert=True)
-            await query.edit_message_reply_markup(reply_markup=build_subscription_keyboard(missing))
+            await safe_edit_markup(query.message, reply_markup=build_subscription_keyboard(missing))
             return
 
     if chat_id in subscribers:
@@ -332,13 +357,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if action == "admin_close":
         admin_state.pop(ADMIN_ID, None)
         await query.answer()
-        await query.edit_message_text("Panel yopildi. Qayta ochish uchun /admin yozing.")
+        await safe_edit_text(query.message, "Panel yopildi. Qayta ochish uchun /admin yozing.")
         return
 
     if action == "admin_stats":
         await query.answer()
         scored = sum(1 for p in programs.values() if p.get("ball") is not None)
-        await query.edit_message_text(
+        await safe_edit_text(query.message, 
             f"📊 <b>Statistika</b>\n\n"
             f"Obunachilar soni: {len(subscribers)}\n"
             f"Majburiy kanallar soni: {len(force_channels)}\n"
@@ -354,13 +379,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             text = "📋 <b>Majburiy kanallar:</b>\n\n" + "\n".join(f"• {c}" for c in force_channels)
         else:
             text = "📋 Hozircha majburiy kanal yo'q."
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=admin_menu_keyboard())
+        await safe_edit_text(query.message, text, parse_mode=ParseMode.HTML, reply_markup=admin_menu_keyboard())
         return
 
     if action == "admin_import":
         admin_state[ADMIN_ID] = "awaiting_import"
         await query.answer()
-        await query.edit_message_text(
+        await safe_edit_text(query.message, 
             "📥 Oldingi obunachilar ID ro'yxatini shu yerga yuboring "
             "(raqamlar, vergul yoki qator bilan ajratilgan holda — istalgan formatda bo'lishi mumkin).\n\n"
             "Bekor qilish uchun /admin yozing."
@@ -370,7 +395,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if action == "admin_add_channel":
         admin_state[ADMIN_ID] = "awaiting_add_channel"
         await query.answer()
-        await query.edit_message_text(
+        await safe_edit_text(query.message, 
             "➕ Yangi kanal username'ini yuboring (masalan: @mening_kanalim).\n\n"
             "❗️ Bot o'sha kanalga <b>admin</b> qilib qo'shilgan bo'lishi kerak.\n"
             "Bekor qilish uchun /admin yozing.",
@@ -381,13 +406,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if action == "admin_remove_channel":
         await query.answer()
         if not force_channels:
-            await query.edit_message_text("Hozircha kanal yo'q.", reply_markup=admin_menu_keyboard())
+            await safe_edit_text(query.message, "Hozircha kanal yo'q.", reply_markup=admin_menu_keyboard())
             return
         rows = [
             [InlineKeyboardButton(f"🗑 {c}", callback_data=f"delch:{c}")] for c in force_channels
         ]
         rows.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_back")])
-        await query.edit_message_text(
+        await safe_edit_text(query.message, 
             "O'chirmoqchi bo'lgan kanalni tanlang:", reply_markup=InlineKeyboardMarkup(rows)
         )
         return
@@ -395,7 +420,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if action == "admin_back":
         admin_state.pop(ADMIN_ID, None)
         await query.answer()
-        await query.edit_message_text("🛠 <b>Admin panel</b>", parse_mode=ParseMode.HTML, reply_markup=admin_menu_keyboard())
+        await safe_edit_text(query.message, "🛠 <b>Admin panel</b>", parse_mode=ParseMode.HTML, reply_markup=admin_menu_keyboard())
         return
 
     if action.startswith("delch:"):
@@ -403,7 +428,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         force_channels.discard(channel)
         save_json_set(CHANNELS_FILE, force_channels)
         await query.answer(f"{channel} o'chirildi ✅")
-        await query.edit_message_text(
+        await safe_edit_text(query.message, 
             f"✅ {channel} kanallar ro'yxatidan o'chirildi.", reply_markup=admin_menu_keyboard()
         )
         return
@@ -419,7 +444,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_back")],
             ]
         )
-        await query.edit_message_text(
+        await safe_edit_text(query.message, 
             f"🎓 <b>Yo'nalishlar</b>\n\nJami: {len(programs)} ta, balli kiritilgan: {scored} ta.\n\n"
             "Faqat balli kiritilgan yo'nalishlar Ball kalkulyatorida ishlatiladi.",
             parse_mode=ParseMode.HTML,
@@ -430,7 +455,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if action == "admin_add_program":
         admin_state[ADMIN_ID] = "awaiting_add_program"
         await query.answer()
-        await query.edit_message_text(
+        await safe_edit_text(query.message, 
             "➕ Yangi yo'nalishlarni yuboring.\n\n"
             "Format: <b>Nomi | Ball</b> (har biri yangi qatordan)\n"
             "Masalan:\n"
@@ -454,21 +479,21 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             text = "📋 Hozircha yo'nalish yo'q."
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_programs")]])
-        await query.edit_message_text(text[:4000], parse_mode=ParseMode.HTML, reply_markup=kb)
+        await safe_edit_text(query.message, text[:4000], parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
     if action == "admin_remove_program":
         await query.answer()
         if not programs:
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_programs")]])
-            await query.edit_message_text("Hozircha yo'nalish yo'q.", reply_markup=kb)
+            await safe_edit_text(query.message, "Hozircha yo'nalish yo'q.", reply_markup=kb)
             return
         rows = [
             [InlineKeyboardButton(f"🗑 {p['name']}", callback_data=f"delprog:{pid}")]
             for pid, p in programs.items()
         ]
         rows.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_programs")])
-        await query.edit_message_text(
+        await safe_edit_text(query.message, 
             "O'chirmoqchi bo'lgan yo'nalishni tanlang:", reply_markup=InlineKeyboardMarkup(rows)
         )
         return
@@ -480,7 +505,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.answer("O'chirildi ✅" if removed else "Topilmadi")
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_programs")]])
         msg = f"✅ {removed['name']} o'chirildi." if removed else "Bu yo'nalish topilmadi."
-        await query.edit_message_text(msg, reply_markup=kb)
+        await safe_edit_text(query.message, msg, reply_markup=kb)
         return
 
     if action == "admin_ad":
@@ -490,7 +515,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         kb = InlineKeyboardMarkup(
             [[InlineKeyboardButton("🗑 Reklamani o'chirish", callback_data="admin_ad_clear")]]
         )
-        await query.edit_message_text(
+        await safe_edit_text(query.message, 
             f"📝 Hozirgi reklama matni:\n\n{current}\n\n"
             "Ball kalkulyatori natijasi oxiriga qo'shiladigan yangi matnni yuboring.\n\n"
             "Bekor qilish uchun /admin yozing.",
@@ -504,13 +529,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         save_ad_text("")
         admin_state.pop(ADMIN_ID, None)
         await query.answer("Reklama o'chirildi ✅")
-        await query.edit_message_text("✅ Reklama matni o'chirildi.", reply_markup=admin_menu_keyboard())
+        await safe_edit_text(query.message, "✅ Reklama matni o'chirildi.", reply_markup=admin_menu_keyboard())
         return
 
     if action == "admin_broadcast":
         admin_state[ADMIN_ID] = "awaiting_broadcast"
         await query.answer()
-        await query.edit_message_text(
+        await safe_edit_text(query.message, 
             "📢 Yubormoqchi bo'lgan xabaringizni yuboring:\n"
             "— Matn, yoki\n"
             "— Rasm/video (izoh bilan yoki izohsiz)\n\n"
@@ -522,18 +547,18 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.answer()
         data = pending_broadcast.pop(ADMIN_ID, None)
         if not data:
-            await query.edit_message_text("Xabar topilmadi, qaytadan urinib ko'ring.")
+            await safe_edit_text(query.message, "Xabar topilmadi, qaytadan urinib ko'ring.")
             return
-        await query.edit_message_text("⏳ Yuborilmoqda...")
+        await safe_edit_text(query.message, "⏳ Yuborilmoqda...")
         sent, failed = await send_to_all(context.bot, **data)
-        await query.edit_message_text(f"✅ Yuborildi: {sent}\n❌ Xato: {failed}")
+        await safe_edit_text(query.message, f"✅ Yuborildi: {sent}\n❌ Xato: {failed}")
         return
 
     if action == "cancel_broadcast":
         pending_broadcast.pop(ADMIN_ID, None)
         admin_state.pop(ADMIN_ID, None)
         await query.answer("Bekor qilindi")
-        await query.edit_message_text("Bekor qilindi.", reply_markup=admin_menu_keyboard())
+        await safe_edit_text(query.message, "Bekor qilindi.", reply_markup=admin_menu_keyboard())
         return
 
 
@@ -704,6 +729,7 @@ def main() -> None:
         pattern="^(admin_|delch:|delprog:|confirm_broadcast|cancel_broadcast)"
     ))
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.VIDEO) & ~filters.COMMAND, universal_input_handler))
+    app.add_error_handler(global_error_handler)
 
     logger.info("Bot ishga tushdi...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
