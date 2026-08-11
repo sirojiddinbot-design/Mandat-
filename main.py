@@ -347,6 +347,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global ad_text
     query = update.callback_query
     if query.from_user.id != ADMIN_ID:
         await query.answer("⛔ Ruxsat yo'q", show_alert=True)
@@ -524,7 +525,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if action == "admin_ad_clear":
-        global ad_text
         ad_text = ""
         save_ad_text("")
         admin_state.pop(ADMIN_ID, None)
@@ -566,6 +566,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # Matn/media xabarlarni holatga qarab yo'naltirish
 # ---------------------------------------------------------
 async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global ad_text
     user_id = update.effective_user.id
     message = update.message
 
@@ -633,7 +634,6 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
 
     if state == "awaiting_ad_text":
         new_text = (message.text or "").strip()
-        global ad_text
         ad_text = new_text
         save_ad_text(new_text)
         admin_state.pop(ADMIN_ID, None)
