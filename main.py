@@ -18,31 +18,23 @@ from telegram.ext import (
 )
 
 # ---------------------------------------------------------
-# SOZLAMALAR — Railway'dagi Variables bo'limidan o'qiladi.
+# SOZLAMALAR
 # ---------------------------------------------------------
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 ADMIN_ID = int(os.environ["ADMIN_ID"])
-
-# Boshlang'ich kanallar (ixtiyoriy) — keyinchalik admin panel orqali
-# kanal qo'shish/o'chirish mumkin, Railway'ga qayta kirish shart emas.
 SEED_CHANNELS = os.environ.get("FORCE_CHANNELS", "")
 
-# Doimiy xotira papkasi. Railway'da Volume "/data" ga ulangan bo'lsa,
-# ma'lumotlar deploy qilinganda ham o'chmaydi.
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 try:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     BASE_DIR = DATA_DIR
 except Exception:
     BASE_DIR = Path(__file__).parent
-    logging.getLogger(__name__).warning(
-        "DATA_DIR yozib bo'lmadi, vaqtinchalik papkaga saqlanadi — Volume ulanmagan bo'lishi mumkin."
-    )
 
 SUBS_FILE = BASE_DIR / "subscribers.json"
 CHANNELS_FILE = BASE_DIR / "channels.json"
 PROGRAMS_FILE = BASE_DIR / "programs.json"
-AD_FILE = BASE_DIR / "ad.json"
+ADS_FILE = BASE_DIR / "ads.json"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -52,9 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------
-# Xavfsiz tahrirlash — "Message is not modified" xatosi butun
-# botni yiqitib qo'ymasligi uchun (masalan bir xil tugma ketma-ket
-# bosilganda Telegram shu xatoni qaytaradi).
+# Xavfsiz tahrirlash
 # ---------------------------------------------------------
 async def safe_edit_text(message, text, **kwargs):
     try:
@@ -77,7 +67,7 @@ async def global_error_handler(update, context) -> None:
 
 
 # ---------------------------------------------------------
-# Ma'lumotlarni saqlash / o'qish
+# Saqlash / o'qish
 # ---------------------------------------------------------
 def load_json_set(path: Path) -> set:
     if path.exists():
@@ -97,26 +87,22 @@ else:
     force_channels = {c.strip() for c in SEED_CHANNELS.split(",") if c.strip()}
     save_json_set(CHANNELS_FILE, force_channels)
 
-# Har bir adminning "hozir nima kutilyapti" holati
-admin_state: dict[int, str] = {}
-# Yuborishni kutayotgan xabar (tasdiqlashdan oldin)
-pending_broadcast: dict[int, dict] = {}
 
-
-# ---------------------------------------------------------
-# Yo'nalishlar ro'yxati: {id: {"name": str, "ball": float|None}}
-# ---------------------------------------------------------
+# Yo'nalishlar: {id: {"name": str, "ball": float, "fan": str}}
 def load_programs() -> dict:
     if not PROGRAMS_FILE.exists():
         return {}
     raw = json.loads(PROGRAMS_FILE.read_text())
-    # Eski formatdan (id -> matn) yangi formatga (id -> {"name","ball"}) o'tkazish
     fixed = {}
     for pid, val in raw.items():
         if isinstance(val, dict):
-            fixed[pid] = {"name": val.get("name", ""), "ball": val.get("ball")}
+            fixed[pid] = {
+                "name": val.get("name", ""),
+                "ball": val.get("ball"),
+                "fan": val.get("fan", ""),
+            }
         else:
-            fixed[pid] = {"name": val, "ball": None}
+            fixed[pid] = {"name": val, "ball": None, "fan": ""}
     return fixed
 
 
@@ -127,27 +113,64 @@ def save_programs(data: dict) -> None:
 programs: dict[str, dict] = load_programs()
 
 
-# ---------------------------------------------------------
-# Reklama matni (admin sozlaydi, ball kalkulyatori natijasiga qo'shiladi)
-# ---------------------------------------------------------
-def load_ad_text() -> str:
-    if AD_FILE.exists():
-        return json.loads(AD_FILE.read_text()).get("text", "")
-    return ""
+# Reklamalar: {id: {"text": str, "active": bool, "views": int}}
+# + sozlamalar: {"show_on_start": bool, "show_on_result": bool}
+def load_ads() -> dict:
+    if ADS_FILE.exists():
+        data = json.loads(ADS_FILE.read_text())
+        return {
+            "items": data.get("items", {}),
+            "show_on_start": data.get("show_on_start", True),
+            "show_on_result": data.get("show_on_result", True),
+        }
+    return {"items": {}, "show_on_start": True, "show_on_result": True}
 
 
-def save_ad_text(text: str) -> None:
-    AD_FILE.write_text(json.dumps({"text": text}, ensure_ascii=False))
+def save_ads(data: dict) -> None:
+    ADS_FILE.write_text(json.dumps(data, ensure_ascii=False))
 
 
-ad_text: str = load_ad_text()
+ads: dict = load_ads()
 
-# Har bir foydalanuvchining ball-kalkulyator oqimidagi holati
+admin_state: dict[int, str] = {}
+pending_broadcast: dict[int, dict] = {}
 user_calc_state: dict[int, dict] = {}
 
 
 # ---------------------------------------------------------
-# Majburiy obunani tekshirish
+# Reklama yordamchilari
+# ---------------------------------------------------------
+def get_active_ad() -> tuple[str, str] | None:
+    """Faol reklamalardan birini qaytaradi: (ad_id, text)"""
+    active = [(aid, a) for aid, a in ads["items"].items() if a.get("active")]
+    if not active:
+        return None
+    # Eng kam ko'rilganini tanlaymiz (teng taqsimlash uchun)
+    aid, ad = min(active, key=lambda x: x[1].get("views", 0))
+    return aid, ad["text"]
+
+
+def register_ad_view(ad_id: str) -> None:
+    if ad_id in ads["items"]:
+        ads["items"][ad_id]["views"] = ads["items"][ad_id].get("views", 0) + 1
+        save_ads(ads)
+
+
+def append_ad(text: str, place: str) -> str:
+    """place: 'start' yoki 'result'"""
+    key = "show_on_start" if place == "start" else "show_on_result"
+    if not ads.get(key):
+        return text
+    result = get_active_ad()
+    if not result:
+        return text
+    ad_id, ad_text = result
+    register_ad_view(ad_id)
+    return f"{text}\n\n➖➖➖➖➖\n{ad_text}"
+
+
+# ---------------------------------------------------------
+# Majburiy obuna
 # ---------------------------------------------------------
 async def get_missing_channels(bot, user_id: int) -> list[str]:
     missing = []
@@ -166,9 +189,7 @@ def build_subscription_keyboard(missing: list[str]) -> InlineKeyboardMarkup:
     rows = []
     for channel in missing:
         username = channel.lstrip("@")
-        rows.append(
-            [InlineKeyboardButton(f"➕ {channel}", url=f"https://t.me/{username}")]
-        )
+        rows.append([InlineKeyboardButton(f"➕ {channel}", url=f"https://t.me/{username}")])
     rows.append([InlineKeyboardButton("✅ Tekshirdim", callback_data="check_sub")])
     return InlineKeyboardMarkup(rows)
 
@@ -188,18 +209,16 @@ async def show_main_menu(chat_id: int, bot, edit_message=None) -> None:
         "🔔 <b>Eslatmani yoqish</b> — yakuniy natijalar e'lon qilinganda tezkor xabar olasiz\n"
         "🧮 <b>Ball kalkulyatori</b> — to'plagan ballingiz asosida mos yo'nalishlarni bilib olasiz"
     )
+    text = append_ad(text, "start")
+
     if edit_message:
         await safe_edit_text(edit_message, text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
     else:
         await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
-# ---------------------------------------------------------
-# /start
-# ---------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-
     if force_channels:
         missing = await get_missing_channels(context.bot, chat_id)
         if missing:
@@ -209,20 +228,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=build_subscription_keyboard(missing),
             )
             return
-
     await show_main_menu(chat_id, context.bot)
 
 
 async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     chat_id = query.message.chat_id
-
     missing = await get_missing_channels(context.bot, chat_id)
     if missing:
         await query.answer("Hali barcha kanallarga obuna bo'lmadingiz ❌", show_alert=True)
         await safe_edit_markup(query.message, reply_markup=build_subscription_keyboard(missing))
         return
-
     await query.answer("Obuna tasdiqlandi ✅")
     await show_main_menu(chat_id, context.bot, edit_message=query.message)
 
@@ -230,14 +246,12 @@ async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def toggle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     chat_id = query.message.chat_id
-
     if force_channels:
         missing = await get_missing_channels(context.bot, chat_id)
         if missing:
             await query.answer("Avval kanallarga obuna bo'ling ❌", show_alert=True)
             await safe_edit_markup(query.message, reply_markup=build_subscription_keyboard(missing))
             return
-
     if chat_id in subscribers:
         subscribers.remove(chat_id)
         save_json_set(SUBS_FILE, subscribers)
@@ -246,64 +260,103 @@ async def toggle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
         subscribers.add(chat_id)
         save_json_set(SUBS_FILE, subscribers)
         await query.answer("Eslatma yoqildi ✅")
-
     await show_main_menu(chat_id, context.bot, edit_message=query.message)
 
 
 # ===========================================================
-# BALL KALKULYATORI (foydalanuvchilar uchun)
+# BALL KALKULYATORI (fan majmuasi bilan)
 # ===========================================================
+def get_all_fans() -> list[str]:
+    fans = {p["fan"] for p in programs.values() if p.get("fan") and p.get("ball") is not None}
+    return sorted(fans)
+
+
+def build_fan_keyboard() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(f, callback_data=f"calcfan:{f}")] for f in get_all_fans()]
+    rows.append([InlineKeyboardButton("❌ Bekor qilish", callback_data="calc_cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def start_calc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     chat_id = query.message.chat_id
-
-    scored = [p for p in programs.values() if p.get("ball") is not None]
-    if not scored:
+    fans = get_all_fans()
+    if not fans:
         await query.answer()
         await query.message.reply_text(
-            "Hozircha yo'nalishlar bo'yicha ball ma'lumotlari kiritilmagan. "
-            "Birozdan so'ng qayta urinib ko'ring."
+            "Hozircha yo'nalishlar bazasi to'ldirilmagan. Birozdan so'ng qayta urinib ko'ring."
+        )
+        return
+    await query.answer()
+    await query.message.reply_text(
+        "🧮 <b>Ball kalkulyatori</b>\n\nAvval fanlar majmuangizni tanlang:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_fan_keyboard(),
+    )
+
+
+async def calc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    chat_id = query.message.chat_id
+    action = query.data
+
+    if action == "calc_cancel":
+        user_calc_state.pop(chat_id, None)
+        await query.answer("Bekor qilindi")
+        await safe_edit_text(query.message, "Bekor qilindi. Qayta boshlash uchun /start yozing.")
+        return
+
+    if action.startswith("calcfan:"):
+        fan = action.split(":", 1)[1]
+        user_calc_state[chat_id] = {"stage": "awaiting_score", "fan": fan}
+        await query.answer()
+        await safe_edit_text(
+            query.message,
+            f"✅ Tanlangan fanlar: <b>{fan}</b>\n\n"
+            "Endi to'plagan umumiy ballingizni kiriting.\nMasalan: 165.3",
+            parse_mode=ParseMode.HTML,
         )
         return
 
-    user_calc_state[chat_id] = {"stage": "awaiting_score"}
-    await query.answer()
-    await query.message.reply_text(
-        "🧮 To'plagan umumiy ballingizni kiriting.\nMasalan: 165.3"
-    )
 
-
-def format_calc_result(score: float) -> str:
+def format_calc_result(score: float, fan: str) -> str:
     matches = [
         p for p in programs.values()
-        if p.get("ball") is not None and p["ball"] <= score
+        if p.get("ball") is not None and p.get("fan") == fan and p["ball"] <= score
     ]
     matches.sort(key=lambda p: p["ball"], reverse=True)
 
+    all_in_fan = [p for p in programs.values() if p.get("fan") == fan and p.get("ball") is not None]
+
     if not matches:
+        min_ball = min((p["ball"] for p in all_in_fan), default=None)
         body = (
-            f"🧮 Ballingiz: {score}\n\n"
-            "Afsuski, hozircha kiritilgan yo'nalishlar orasida ballingizga mos "
-            "keladigani topilmadi."
+            f"🧮 Ballingiz: {score}\n"
+            f"📚 Fanlar: {fan}\n\n"
+            "❌ Afsuski, bu fanlar majmuasida ballingizga mos yo'nalish topilmadi."
         )
+        if min_ball is not None:
+            body += f"\n\nEng past o'tish balli: {min_ball}"
     else:
-        top = matches[:25]
-        lines = [f"🧮 Ballingiz: {score}", f"✅ Mos keladigan yo'nalishlar ({len(matches)} ta topildi):", ""]
-        for p in top:
-            lines.append(f"• {p['name']} — {p['ball']}")
-        if len(matches) > 25:
-            lines.append(f"\n... va yana {len(matches) - 25} ta yo'nalish.")
+        lines = [
+            f"🧮 Ballingiz: {score}",
+            f"📚 Fanlar: {fan}",
+            "",
+            f"✅ Mos keladigan yo'nalishlar ({len(matches)} ta):",
+            "",
+        ]
+        for p in matches[:30]:
+            farq = round(score - p["ball"], 1)
+            lines.append(f"• {p['name']}\n   O'tish balli: {p['ball']} (sizda +{farq})")
+        if len(matches) > 30:
+            lines.append(f"\n... va yana {len(matches) - 30} ta yo'nalish.")
         body = "\n".join(lines)
 
     body += (
-        "\n\n📌 Bu ma'lumotlar o'tgan yilgi (taxminiy) ko'rsatkichlar asosida "
-        "berilmoqda, rasmiy natija emas."
+        "\n\n📌 Bu ma'lumotlar 2025/2026 o'quv yili ko'rsatkichlari asosida berilmoqda "
+        "va taxminiy xarakterga ega. Rasmiy ma'lumot uchun: https://mandat.uzbmb.uz"
     )
-
-    if ad_text:
-        body += f"\n\n{ad_text}"
-
-    return body
+    return append_ad(body, "result")
 
 
 async def count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -328,10 +381,41 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("📊 Statistika", callback_data="admin_stats"),
             ],
             [InlineKeyboardButton("📥 Ro'yxatni tiklash (import)", callback_data="admin_import")],
-            [InlineKeyboardButton("🎓 Yo'nalishlar (ball bazasi)", callback_data="admin_programs")],
-            [InlineKeyboardButton("📝 Reklama matni", callback_data="admin_ad")],
+            [InlineKeyboardButton("🎓 Yo'nalishlar bazasi", callback_data="admin_programs")],
+            [InlineKeyboardButton("📣 Reklama bo'limi", callback_data="admin_ads")],
             [InlineKeyboardButton("❌ Yopish", callback_data="admin_close")],
         ]
+    )
+
+
+def ads_menu_keyboard() -> InlineKeyboardMarkup:
+    start_status = "✅ Yoniq" if ads.get("show_on_start") else "❌ O'chiq"
+    result_status = "✅ Yoniq" if ads.get("show_on_result") else "❌ O'chiq"
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(f"🚀 Start: {start_status}", callback_data="ad_toggle_start"),
+                InlineKeyboardButton(f"🧮 Natija: {result_status}", callback_data="ad_toggle_result"),
+            ],
+            [InlineKeyboardButton("➕ Reklama qo'shish", callback_data="ad_add")],
+            [InlineKeyboardButton("📋 Reklamalar ro'yxati", callback_data="ad_list")],
+            [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_back")],
+        ]
+    )
+
+
+def ads_summary_text() -> str:
+    total = len(ads["items"])
+    active = sum(1 for a in ads["items"].values() if a.get("active"))
+    views = sum(a.get("views", 0) for a in ads["items"].values())
+    return (
+        "📣 <b>Reklama bo'limi</b>\n\n"
+        f"📊 Jami reklamalar: {total} ta\n"
+        f"✅ Faol: {active} ta\n"
+        f"👁 Jami ko'rishlar: {views} ta\n\n"
+        "⚙️ Sozlamalar:\n"
+        f"🚀 Start'da: {'✅ Yoniq' if ads.get('show_on_start') else '❌ O`chiq'}\n"
+        f"🧮 Natijada: {'✅ Yoniq' if ads.get('show_on_result') else '❌ O`chiq'}"
     )
 
 
@@ -347,7 +431,6 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global ad_text
     query = update.callback_query
     if query.from_user.id != ADMIN_ID:
         await query.answer("⛔ Ruxsat yo'q", show_alert=True)
@@ -364,11 +447,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if action == "admin_stats":
         await query.answer()
         scored = sum(1 for p in programs.values() if p.get("ball") is not None)
-        await safe_edit_text(query.message, 
+        await safe_edit_text(
+            query.message,
             f"📊 <b>Statistika</b>\n\n"
-            f"Obunachilar soni: {len(subscribers)}\n"
-            f"Majburiy kanallar soni: {len(force_channels)}\n"
-            f"Yo'nalishlar soni: {len(programs)} (balli: {scored})",
+            f"Obunachilar: {len(subscribers)}\n"
+            f"Majburiy kanallar: {len(force_channels)}\n"
+            f"Yo'nalishlar: {len(programs)} (balli: {scored})\n"
+            f"Fan majmualari: {len(get_all_fans())}",
             parse_mode=ParseMode.HTML,
             reply_markup=admin_menu_keyboard(),
         )
@@ -386,17 +471,18 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if action == "admin_import":
         admin_state[ADMIN_ID] = "awaiting_import"
         await query.answer()
-        await safe_edit_text(query.message, 
-            "📥 Oldingi obunachilar ID ro'yxatini shu yerga yuboring "
-            "(raqamlar, vergul yoki qator bilan ajratilgan holda — istalgan formatda bo'lishi mumkin).\n\n"
-            "Bekor qilish uchun /admin yozing."
+        await safe_edit_text(
+            query.message,
+            "📥 Obunachilar ID ro'yxatini yuboring (raqamlar, istalgan formatda).\n\n"
+            "Bekor qilish uchun /admin yozing.",
         )
         return
 
     if action == "admin_add_channel":
         admin_state[ADMIN_ID] = "awaiting_add_channel"
         await query.answer()
-        await safe_edit_text(query.message, 
+        await safe_edit_text(
+            query.message,
             "➕ Yangi kanal username'ini yuboring (masalan: @mening_kanalim).\n\n"
             "❗️ Bot o'sha kanalga <b>admin</b> qilib qo'shilgan bo'lishi kerak.\n"
             "Bekor qilish uchun /admin yozing.",
@@ -409,13 +495,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if not force_channels:
             await safe_edit_text(query.message, "Hozircha kanal yo'q.", reply_markup=admin_menu_keyboard())
             return
-        rows = [
-            [InlineKeyboardButton(f"🗑 {c}", callback_data=f"delch:{c}")] for c in force_channels
-        ]
+        rows = [[InlineKeyboardButton(f"🗑 {c}", callback_data=f"delch:{c}")] for c in force_channels]
         rows.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_back")])
-        await safe_edit_text(query.message, 
-            "O'chirmoqchi bo'lgan kanalni tanlang:", reply_markup=InlineKeyboardMarkup(rows)
-        )
+        await safe_edit_text(query.message, "O'chirmoqchi bo'lgan kanalni tanlang:", reply_markup=InlineKeyboardMarkup(rows))
         return
 
     if action == "admin_back":
@@ -429,25 +511,26 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         force_channels.discard(channel)
         save_json_set(CHANNELS_FILE, force_channels)
         await query.answer(f"{channel} o'chirildi ✅")
-        await safe_edit_text(query.message, 
-            f"✅ {channel} kanallar ro'yxatidan o'chirildi.", reply_markup=admin_menu_keyboard()
-        )
+        await safe_edit_text(query.message, f"✅ {channel} o'chirildi.", reply_markup=admin_menu_keyboard())
         return
 
+    # ---------- Yo'nalishlar ----------
     if action == "admin_programs":
         await query.answer()
         scored = sum(1 for p in programs.values() if p.get("ball") is not None)
         kb = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("➕ Yo'nalish qo'shish", callback_data="admin_add_program")],
-                [InlineKeyboardButton("➖ Yo'nalish o'chirish", callback_data="admin_remove_program")],
+                [InlineKeyboardButton("🗑 Hammasini o'chirish", callback_data="admin_clear_programs")],
                 [InlineKeyboardButton("📋 Ro'yxat", callback_data="admin_list_programs")],
                 [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_back")],
             ]
         )
-        await safe_edit_text(query.message, 
-            f"🎓 <b>Yo'nalishlar</b>\n\nJami: {len(programs)} ta, balli kiritilgan: {scored} ta.\n\n"
-            "Faqat balli kiritilgan yo'nalishlar Ball kalkulyatorida ishlatiladi.",
+        await safe_edit_text(
+            query.message,
+            f"🎓 <b>Yo'nalishlar bazasi</b>\n\n"
+            f"Jami: {len(programs)} ta\nBalli kiritilgan: {scored} ta\n"
+            f"Fan majmualari: {len(get_all_fans())} ta",
             parse_mode=ParseMode.HTML,
             reply_markup=kb,
         )
@@ -456,90 +539,152 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if action == "admin_add_program":
         admin_state[ADMIN_ID] = "awaiting_add_program"
         await query.answer()
-        await safe_edit_text(query.message, 
-            "➕ Yangi yo'nalishlarni yuboring.\n\n"
-            "Format: <b>Nomi | Ball</b> (har biri yangi qatordan)\n"
+        await safe_edit_text(
+            query.message,
+            "➕ Yo'nalishlarni quyidagi formatda yuboring:\n\n"
+            "<code>Nomi | Ball | Fanlar</code>\n\n"
             "Masalan:\n"
-            "<code>TATU — Dasturiy injiniring | 165.2\n"
-            "ToshDTU — Iqtisodiyot | 148.7</code>\n\n"
-            "Ball kiritmasangiz ham bo'ladi (faqat nom yozing), lekin bunday "
-            "yo'nalish Ball kalkulyatorida ishlatilmaydi.\n\n"
+            "<code>Davolash ishi | 130.0 | Biologiya, Kimyo\n"
+            "Dasturiy injiniring | 56.7 | Matematika, Fizika</code>\n\n"
+            "Har birini yangi qatordan yozing.\n"
             "Bekor qilish uchun /admin yozing.",
             parse_mode=ParseMode.HTML,
         )
+        return
+
+    if action == "admin_clear_programs":
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✅ Ha, o'chirilsin", callback_data="admin_clear_confirm")],
+                [InlineKeyboardButton("❌ Yo'q", callback_data="admin_programs")],
+            ]
+        )
+        await query.answer()
+        await safe_edit_text(
+            query.message,
+            f"⚠️ Barcha {len(programs)} ta yo'nalish o'chiriladi. Tasdiqlaysizmi?",
+            reply_markup=kb,
+        )
+        return
+
+    if action == "admin_clear_confirm":
+        programs.clear()
+        save_programs(programs)
+        await query.answer("O'chirildi ✅")
+        await safe_edit_text(query.message, "✅ Barcha yo'nalishlar o'chirildi.", reply_markup=admin_menu_keyboard())
         return
 
     if action == "admin_list_programs":
         await query.answer()
         if programs:
             lines = []
-            for p in programs.values():
-                ball_str = str(p["ball"]) if p.get("ball") is not None else "ball yo'q"
-                lines.append(f"• {p['name']} — {ball_str}")
+            for p in list(programs.values())[:60]:
+                ball = p["ball"] if p.get("ball") is not None else "—"
+                lines.append(f"• {p['name']} | {ball} | {p.get('fan', '—')}")
             text = "📋 <b>Yo'nalishlar:</b>\n\n" + "\n".join(lines)
+            if len(programs) > 60:
+                text += f"\n\n... va yana {len(programs) - 60} ta"
         else:
             text = "📋 Hozircha yo'nalish yo'q."
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_programs")]])
         await safe_edit_text(query.message, text[:4000], parse_mode=ParseMode.HTML, reply_markup=kb)
         return
 
-    if action == "admin_remove_program":
+    # ---------- Reklama bo'limi ----------
+    if action == "admin_ads":
         await query.answer()
-        if not programs:
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_programs")]])
-            await safe_edit_text(query.message, "Hozircha yo'nalish yo'q.", reply_markup=kb)
-            return
-        rows = [
-            [InlineKeyboardButton(f"🗑 {p['name']}", callback_data=f"delprog:{pid}")]
-            for pid, p in programs.items()
-        ]
-        rows.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_programs")])
-        await safe_edit_text(query.message, 
-            "O'chirmoqchi bo'lgan yo'nalishni tanlang:", reply_markup=InlineKeyboardMarkup(rows)
-        )
+        await safe_edit_text(query.message, ads_summary_text(), parse_mode=ParseMode.HTML, reply_markup=ads_menu_keyboard())
         return
 
-    if action.startswith("delprog:"):
-        pid = action.split(":", 1)[1]
-        removed = programs.pop(pid, None)
-        save_programs(programs)
-        await query.answer("O'chirildi ✅" if removed else "Topilmadi")
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_programs")]])
-        msg = f"✅ {removed['name']} o'chirildi." if removed else "Bu yo'nalish topilmadi."
-        await safe_edit_text(query.message, msg, reply_markup=kb)
+    if action == "ad_toggle_start":
+        ads["show_on_start"] = not ads.get("show_on_start")
+        save_ads(ads)
+        await query.answer("O'zgartirildi ✅")
+        await safe_edit_text(query.message, ads_summary_text(), parse_mode=ParseMode.HTML, reply_markup=ads_menu_keyboard())
         return
 
-    if action == "admin_ad":
+    if action == "ad_toggle_result":
+        ads["show_on_result"] = not ads.get("show_on_result")
+        save_ads(ads)
+        await query.answer("O'zgartirildi ✅")
+        await safe_edit_text(query.message, ads_summary_text(), parse_mode=ParseMode.HTML, reply_markup=ads_menu_keyboard())
+        return
+
+    if action == "ad_add":
         admin_state[ADMIN_ID] = "awaiting_ad_text"
         await query.answer()
-        current = ad_text if ad_text else "(hozircha o'rnatilmagan)"
-        kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🗑 Reklamani o'chirish", callback_data="admin_ad_clear")]]
-        )
-        await safe_edit_text(query.message, 
-            f"📝 Hozirgi reklama matni:\n\n{current}\n\n"
-            "Ball kalkulyatori natijasi oxiriga qo'shiladigan yangi matnni yuboring.\n\n"
+        await safe_edit_text(
+            query.message,
+            "➕ Yangi reklama matnini yuboring.\n\n"
+            "Havola qo'shsangiz ham bo'ladi.\n"
             "Bekor qilish uchun /admin yozing.",
+        )
+        return
+
+    if action == "ad_list":
+        await query.answer()
+        if not ads["items"]:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_ads")]])
+            await safe_edit_text(query.message, "Hozircha reklama yo'q.", reply_markup=kb)
+            return
+        rows = []
+        for aid, ad in ads["items"].items():
+            status = "✅" if ad.get("active") else "❌"
+            preview = ad["text"][:25].replace("\n", " ")
+            rows.append([InlineKeyboardButton(f"{status} {preview}… ({ad.get('views', 0)})", callback_data=f"ad_view:{aid}")])
+        rows.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_ads")])
+        await safe_edit_text(query.message, "📋 Reklamalar (bosib boshqaring):", reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if action.startswith("ad_view:"):
+        aid = action.split(":", 1)[1]
+        ad = ads["items"].get(aid)
+        if not ad:
+            await query.answer("Topilmadi")
+            return
+        await query.answer()
+        status = "✅ Faol" if ad.get("active") else "❌ O'chiq"
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🔄 Yoqish/O'chirish", callback_data=f"ad_toggle:{aid}")],
+                [InlineKeyboardButton("🗑 O'chirish", callback_data=f"ad_del:{aid}")],
+                [InlineKeyboardButton("⬅️ Orqaga", callback_data="ad_list")],
+            ]
+        )
+        await safe_edit_text(
+            query.message,
+            f"📣 <b>Reklama</b>\n\nHolat: {status}\n👁 Ko'rishlar: {ad.get('views', 0)}\n\n{ad['text']}",
+            parse_mode=ParseMode.HTML,
             reply_markup=kb,
         )
         return
 
-    if action == "admin_ad_clear":
-        ad_text = ""
-        save_ad_text("")
-        admin_state.pop(ADMIN_ID, None)
-        await query.answer("Reklama o'chirildi ✅")
-        await safe_edit_text(query.message, "✅ Reklama matni o'chirildi.", reply_markup=admin_menu_keyboard())
+    if action.startswith("ad_toggle:"):
+        aid = action.split(":", 1)[1]
+        if aid in ads["items"]:
+            ads["items"][aid]["active"] = not ads["items"][aid].get("active")
+            save_ads(ads)
+            await query.answer("O'zgartirildi ✅")
+        await safe_edit_text(query.message, ads_summary_text(), parse_mode=ParseMode.HTML, reply_markup=ads_menu_keyboard())
         return
 
+    if action.startswith("ad_del:"):
+        aid = action.split(":", 1)[1]
+        ads["items"].pop(aid, None)
+        save_ads(ads)
+        await query.answer("O'chirildi ✅")
+        await safe_edit_text(query.message, ads_summary_text(), parse_mode=ParseMode.HTML, reply_markup=ads_menu_keyboard())
+        return
+
+    # ---------- Broadcast ----------
     if action == "admin_broadcast":
         admin_state[ADMIN_ID] = "awaiting_broadcast"
         await query.answer()
-        await safe_edit_text(query.message, 
+        await safe_edit_text(
+            query.message,
             "📢 Yubormoqchi bo'lgan xabaringizni yuboring:\n"
-            "— Matn, yoki\n"
-            "— Rasm/video (izoh bilan yoki izohsiz)\n\n"
-            "Bekor qilish uchun /admin yozing."
+            "— Matn, rasm yoki video\n\n"
+            "Bekor qilish uchun /admin yozing.",
         )
         return
 
@@ -547,7 +692,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.answer()
         data = pending_broadcast.pop(ADMIN_ID, None)
         if not data:
-            await safe_edit_text(query.message, "Xabar topilmadi, qaytadan urinib ko'ring.")
+            await safe_edit_text(query.message, "Xabar topilmadi.")
             return
         await safe_edit_text(query.message, "⏳ Yuborilmoqda...")
         sent, failed = await send_to_all(context.bot, **data)
@@ -563,14 +708,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 # ---------------------------------------------------------
-# Matn/media xabarlarni holatga qarab yo'naltirish
+# Matn/media qabul qilish
 # ---------------------------------------------------------
 async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global ad_text
     user_id = update.effective_user.id
     message = update.message
 
-    # 1) Foydalanuvchi Ball kalkulyatorida ball kutilyaptimi?
+    # Ball kalkulyatori
     c_state = user_calc_state.get(user_id)
     if c_state and c_state.get("stage") == "awaiting_score":
         text = (message.text or "").strip().replace(",", ".")
@@ -579,11 +723,11 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
         except ValueError:
             await message.reply_text("Iltimos, faqat raqam yuboring. Masalan: 165.3")
             return
+        fan = c_state.get("fan", "")
         user_calc_state.pop(user_id, None)
-        await message.reply_text(format_calc_result(score))
+        await message.reply_text(format_calc_result(score, fan), disable_web_page_preview=True)
         return
 
-    # 2) Qolgani faqat admin uchun
     if user_id != ADMIN_ID:
         return
 
@@ -594,7 +738,7 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
     if state == "awaiting_add_channel":
         text = (message.text or "").strip()
         if not text.startswith("@"):
-            await message.reply_text("Kanal username'i @ bilan boshlanishi kerak. Masalan: @mening_kanalim")
+            await message.reply_text("Kanal username'i @ bilan boshlanishi kerak.")
             return
         force_channels.add(text)
         save_json_set(CHANNELS_FILE, force_channels)
@@ -604,56 +748,55 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
 
     if state == "awaiting_add_program":
         lines = [ln.strip() for ln in (message.text or "").split("\n") if ln.strip()]
-        if not lines:
-            await message.reply_text("Bo'sh matn. Qaytadan yuboring.")
-            return
         added = 0
         for line in lines:
-            if "|" in line:
-                name_part, ball_part = line.rsplit("|", 1)
-                name = name_part.strip()
-                ball_part = ball_part.strip().replace(",", ".")
-                try:
-                    ball = float(ball_part)
-                except ValueError:
-                    ball = None
-            else:
-                name = line.strip()
-                ball = None
+            if line.startswith("==="):
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 2:
+                continue
+            name = parts[0]
+            try:
+                ball = float(parts[1].replace(",", "."))
+            except ValueError:
+                continue
+            fan = parts[2] if len(parts) > 2 else ""
             if not name:
                 continue
-            programs[uuid.uuid4().hex[:8]] = {"name": name, "ball": ball}
+            programs[uuid.uuid4().hex[:8]] = {"name": name, "ball": ball, "fan": fan}
             added += 1
         save_programs(programs)
         admin_state.pop(ADMIN_ID, None)
         await message.reply_text(
-            f"✅ {added} ta yo'nalish qo'shildi. Jami: {len(programs)} ta.",
+            f"✅ {added} ta yo'nalish qo'shildi.\nJami: {len(programs)} ta.",
             reply_markup=admin_menu_keyboard(),
         )
         return
 
     if state == "awaiting_ad_text":
         new_text = (message.text or "").strip()
-        ad_text = new_text
-        save_ad_text(new_text)
+        if not new_text:
+            await message.reply_text("Bo'sh matn. Qaytadan yuboring.")
+            return
+        ads["items"][uuid.uuid4().hex[:8]] = {"text": new_text, "active": True, "views": 0}
+        save_ads(ads)
         admin_state.pop(ADMIN_ID, None)
-        await message.reply_text("✅ Reklama matni saqlandi.", reply_markup=admin_menu_keyboard())
+        await message.reply_text("✅ Reklama qo'shildi va faollashtirildi.", reply_markup=ads_menu_keyboard())
         return
 
     if state == "awaiting_import":
         text = message.text or ""
         ids = {int(x) for x in re.findall(r"-?\d{5,}", text)}
         if not ids:
-            await message.reply_text("Hech qanday ID topilmadi. Qaytadan yuboring yoki /admin bilan bekor qiling.")
+            await message.reply_text("Hech qanday ID topilmadi.")
             return
         before = len(subscribers)
         subscribers.update(ids)
         save_json_set(SUBS_FILE, subscribers)
-        added = len(subscribers) - before
         admin_state.pop(ADMIN_ID, None)
         await message.reply_text(
-            f"✅ Import tugadi.\nTopildi: {len(ids)}\nYangi qo'shildi: {added}\n"
-            f"Jami obunachilar: {len(subscribers)}",
+            f"✅ Import tugadi.\nTopildi: {len(ids)}\nYangi: {len(subscribers) - before}\n"
+            f"Jami: {len(subscribers)}",
             reply_markup=admin_menu_keyboard(),
         )
         return
@@ -669,20 +812,17 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
         elif message.text:
             data["text"] = message.text
         else:
-            await message.reply_text("Bu turdagi xabarni yubora olmayman. Matn, rasm yoki video yuboring.")
+            await message.reply_text("Matn, rasm yoki video yuboring.")
             return
 
         pending_broadcast[ADMIN_ID] = data
         admin_state.pop(ADMIN_ID, None)
-
         preview = data.get("text", "")[:200] or "(izohsiz media)"
         confirm_kb = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("✅ Yuborish", callback_data="confirm_broadcast"),
-                    InlineKeyboardButton("❌ Bekor qilish", callback_data="cancel_broadcast"),
-                ]
-            ]
+            [[
+                InlineKeyboardButton("✅ Yuborish", callback_data="confirm_broadcast"),
+                InlineKeyboardButton("❌ Bekor", callback_data="cancel_broadcast"),
+            ]]
         )
         await message.reply_text(
             f"Quyidagi xabar {len(subscribers)} kishiga yuboriladi:\n\n{preview}\n\nTasdiqlaysizmi?",
@@ -691,9 +831,7 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
         return
 
 
-async def send_to_all(
-    bot, text: str = "", photo_id: str | None = None, video_id: str | None = None
-) -> tuple[int, int]:
+async def send_to_all(bot, text: str = "", photo_id: str | None = None, video_id: str | None = None):
     sent, failed = 0, 0
     for chat_id in list(subscribers):
         try:
@@ -709,9 +847,8 @@ async def send_to_all(
             save_json_set(SUBS_FILE, subscribers)
             failed += 1
         except Exception as e:
-            logger.warning(f"Xabar yuborilmadi {chat_id}: {e}")
+            logger.warning(f"Yuborilmadi {chat_id}: {e}")
             failed += 1
-    logger.info(f"Broadcast: yuborildi={sent}, xato={failed}")
     return sent, failed
 
 
@@ -724,15 +861,16 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(check_subscription, pattern="^check_sub$"))
     app.add_handler(CallbackQueryHandler(toggle_subscription, pattern="^toggle_sub$"))
     app.add_handler(CallbackQueryHandler(start_calc, pattern="^start_calc$"))
+    app.add_handler(CallbackQueryHandler(calc_callback, pattern="^(calcfan:|calc_cancel)"))
     app.add_handler(CallbackQueryHandler(
         admin_callback,
-        pattern="^(admin_|delch:|delprog:|confirm_broadcast|cancel_broadcast)"
+        pattern="^(admin_|delch:|ad_|confirm_broadcast|cancel_broadcast)"
     ))
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.VIDEO) & ~filters.COMMAND, universal_input_handler))
     app.add_error_handler(global_error_handler)
 
     logger.info("Bot ishga tushdi...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
