@@ -1,11 +1,10 @@
-import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from pathlib import Path
 
-import requests
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import Forbidden
@@ -24,18 +23,12 @@ from telegram.ext import (
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 ADMIN_ID = int(os.environ["ADMIN_ID"])
 
-# AI tahlil funksiyasi uchun (ixtiyoriy). Bo'lmasa, "🎓 AI orqali tahlil"
-# tugmasi ishlamaydi, lekin botning qolgan qismi normal ishlayveradi.
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-AI_MODEL = "claude-haiku-4-5-20251001"
-
 # Boshlang'ich kanallar (ixtiyoriy) — keyinchalik admin panel orqali
 # kanal qo'shish/o'chirish mumkin, Railway'ga qayta kirish shart emas.
 SEED_CHANNELS = os.environ.get("FORCE_CHANNELS", "")
 
 # Doimiy xotira papkasi. Railway'da Volume "/data" ga ulangan bo'lsa,
-# ma'lumotlar deploy qilinganda ham o'chmaydi. Agar Volume bo'lmasa,
-# oddiy papkaga yozadi (lekin bu holda deploy vaqtida yo'qolishi mumkin).
+# ma'lumotlar deploy qilinganda ham o'chmaydi.
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 try:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -49,6 +42,7 @@ except Exception:
 SUBS_FILE = BASE_DIR / "subscribers.json"
 CHANNELS_FILE = BASE_DIR / "channels.json"
 PROGRAMS_FILE = BASE_DIR / "programs.json"
+AD_FILE = BASE_DIR / "ad.json"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -78,28 +72,53 @@ else:
     force_channels = {c.strip() for c in SEED_CHANNELS.split(",") if c.strip()}
     save_json_set(CHANNELS_FILE, force_channels)
 
-# Har bir adminning "hozir nima kutilyapti" holati (masalan: kanal kutilmoqda)
+# Har bir adminning "hozir nima kutilyapti" holati
 admin_state: dict[int, str] = {}
 # Yuborishni kutayotgan xabar (tasdiqlashdan oldin)
 pending_broadcast: dict[int, dict] = {}
 
-# Yo'nalishlar ro'yxati: {id: "Universitet - Yo'nalish"}
+
+# ---------------------------------------------------------
+# Yo'nalishlar ro'yxati: {id: {"name": str, "ball": float|None}}
+# ---------------------------------------------------------
 def load_programs() -> dict:
-    if PROGRAMS_FILE.exists():
-        return json.loads(PROGRAMS_FILE.read_text())
-    return {}
+    if not PROGRAMS_FILE.exists():
+        return {}
+    raw = json.loads(PROGRAMS_FILE.read_text())
+    # Eski formatdan (id -> matn) yangi formatga (id -> {"name","ball"}) o'tkazish
+    fixed = {}
+    for pid, val in raw.items():
+        if isinstance(val, dict):
+            fixed[pid] = {"name": val.get("name", ""), "ball": val.get("ball")}
+        else:
+            fixed[pid] = {"name": val, "ball": None}
+    return fixed
 
 
 def save_programs(data: dict) -> None:
     PROGRAMS_FILE.write_text(json.dumps(data, ensure_ascii=False))
 
 
-programs: dict[str, str] = load_programs()
+programs: dict[str, dict] = load_programs()
 
-# Har bir foydalanuvchining AI-tahlil oqimidagi holati:
-# {"stage": "awaiting_score" | "selecting", "score": float, "selected": [id,...], "page": int}
-user_analysis_state: dict[int, dict] = {}
-PROGRAMS_PER_PAGE = 8
+
+# ---------------------------------------------------------
+# Reklama matni (admin sozlaydi, ball kalkulyatori natijasiga qo'shiladi)
+# ---------------------------------------------------------
+def load_ad_text() -> str:
+    if AD_FILE.exists():
+        return json.loads(AD_FILE.read_text()).get("text", "")
+    return ""
+
+
+def save_ad_text(text: str) -> None:
+    AD_FILE.write_text(json.dumps({"text": text}, ensure_ascii=False))
+
+
+ad_text: str = load_ad_text()
+
+# Har bir foydalanuvchining ball-kalkulyator oqimidagi holati
+user_calc_state: dict[int, dict] = {}
 
 
 # ---------------------------------------------------------
@@ -135,15 +154,14 @@ async def show_main_menu(chat_id: int, bot, edit_message=None) -> None:
     keyboard = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton(button_text, callback_data="toggle_sub")],
-            [InlineKeyboardButton("🎓 AI orqali natijani taxmin qilish", callback_data="start_analysis")],
+            [InlineKeyboardButton("🧮 Ball kalkulyatori", callback_data="start_calc")],
         ]
     )
     text = (
         "📣 <b>Mandat natijalari haqida xabardor bo'lish</b>\n\n"
-        "Yakuniy natijalar e'lon qilinganda tezkor xabar olish uchun "
-        "quyidagi tugmani bosing.\n\n"
-        "Shuningdek, to'plagan ballingiz asosida tanlagan yo'nalishlaringizga "
-        "kirish ehtimolini sun'iy intellekt yordamida oldindan taxmin qilib ko'rishingiz mumkin."
+        "Quyidagi tugmalardan birini tanlang:\n\n"
+        "🔔 <b>Eslatmani yoqish</b> — yakuniy natijalar e'lon qilinganda tezkor xabar olasiz\n"
+        "🧮 <b>Ball kalkulyatori</b> — to'plagan ballingiz asosida mos yo'nalishlarni bilib olasiz"
     )
     if edit_message:
         await edit_message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
@@ -199,182 +217,74 @@ async def toggle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
         subscribers.remove(chat_id)
         save_json_set(SUBS_FILE, subscribers)
         await query.answer("Eslatma o'chirildi")
-        new_text = "🔔 Eslatmani yoqish"
-        msg = "🔕 Siz obunani bekor qildingiz. Xohlasangiz, qayta yoqishingiz mumkin."
     else:
         subscribers.add(chat_id)
         save_json_set(SUBS_FILE, subscribers)
         await query.answer("Eslatma yoqildi ✅")
-        new_text = "🔕 Eslatmani o'chirish"
-        msg = "✅ Siz muvaffaqiyatli obuna bo'ldingiz! Natijalar e'lon qilinishi bilan sizga xabar boradi."
 
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton(new_text, callback_data="toggle_sub")]]
-    )
-    await query.edit_message_text(msg, reply_markup=keyboard)
+    await show_main_menu(chat_id, context.bot, edit_message=query.message)
 
 
 # ===========================================================
-# AI ORQALI TAHLIL (foydalanuvchilar uchun)
+# BALL KALKULYATORI (foydalanuvchilar uchun)
 # ===========================================================
-def build_program_keyboard(selected: list[str], page: int) -> InlineKeyboardMarkup:
-    ids = list(programs.keys())
-    start = page * PROGRAMS_PER_PAGE
-    page_ids = ids[start:start + PROGRAMS_PER_PAGE]
-
-    rows = []
-    for pid in page_ids:
-        name = programs[pid]
-        label = ("✅ " if pid in selected else "▫️ ") + (name[:45] + "…" if len(name) > 45 else name)
-        rows.append([InlineKeyboardButton(label, callback_data=f"prog_toggle:{pid}")])
-
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton("⬅️", callback_data=f"prog_page:{page-1}"))
-    if start + PROGRAMS_PER_PAGE < len(ids):
-        nav.append(InlineKeyboardButton("➡️", callback_data=f"prog_page:{page+1}"))
-    if nav:
-        rows.append(nav)
-
-    rows.append(
-        [
-            InlineKeyboardButton(f"✅ Tayyor ({len(selected)}/5)", callback_data="prog_done"),
-            InlineKeyboardButton("❌ Bekor qilish", callback_data="prog_cancel"),
-        ]
-    )
-    return InlineKeyboardMarkup(rows)
-
-
-async def start_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start_calc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     chat_id = query.message.chat_id
 
-    if not ANTHROPIC_API_KEY:
+    scored = [p for p in programs.values() if p.get("ball") is not None]
+    if not scored:
         await query.answer()
         await query.message.reply_text(
-            "⚠️ Bu funksiya hozircha sozlanmagan. Admin bilan bog'laning."
+            "Hozircha yo'nalishlar bo'yicha ball ma'lumotlari kiritilmagan. "
+            "Birozdan so'ng qayta urinib ko'ring."
         )
         return
 
-    if not programs:
-        await query.answer()
-        await query.message.reply_text("Hozircha yo'nalishlar ro'yxati kiritilmagan.")
-        return
-
-    user_analysis_state[chat_id] = {"stage": "awaiting_score"}
+    user_calc_state[chat_id] = {"stage": "awaiting_score"}
     await query.answer()
     await query.message.reply_text(
-        "🎓 To'plagan umumiy ballingizni kiriting.\nMasalan: 165.3"
+        "🧮 To'plagan umumiy ballingizni kiriting.\nMasalan: 165.3"
     )
 
 
-async def analysis_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    chat_id = query.message.chat_id
-    action = query.data
-    state = user_analysis_state.get(chat_id)
+def format_calc_result(score: float) -> str:
+    matches = [
+        p for p in programs.values()
+        if p.get("ball") is not None and p["ball"] <= score
+    ]
+    matches.sort(key=lambda p: p["ball"], reverse=True)
 
-    if not state or state.get("stage") != "selecting":
-        await query.answer("Sessiya tugagan. Qaytadan boshlang: /start", show_alert=True)
-        return
+    if not matches:
+        body = (
+            f"🧮 Ballingiz: {score}\n\n"
+            "Afsuski, hozircha kiritilgan yo'nalishlar orasida ballingizga mos "
+            "keladigani topilmadi."
+        )
+    else:
+        top = matches[:25]
+        lines = [f"🧮 Ballingiz: {score}", f"✅ Mos keladigan yo'nalishlar ({len(matches)} ta topildi):", ""]
+        for p in top:
+            lines.append(f"• {p['name']} — {p['ball']}")
+        if len(matches) > 25:
+            lines.append(f"\n... va yana {len(matches) - 25} ta yo'nalish.")
+        body = "\n".join(lines)
 
-    if action.startswith("prog_toggle:"):
-        pid = action.split(":", 1)[1]
-        selected = state["selected"]
-        if pid in selected:
-            selected.remove(pid)
-        elif len(selected) < 5:
-            selected.append(pid)
-        else:
-            await query.answer("Ko'pi bilan 5 ta yo'nalish tanlash mumkin ❌", show_alert=True)
-            return
-        await query.answer()
-        await query.edit_message_reply_markup(reply_markup=build_program_keyboard(selected, state["page"]))
-        return
-
-    if action.startswith("prog_page:"):
-        state["page"] = int(action.split(":", 1)[1])
-        await query.answer()
-        await query.edit_message_reply_markup(reply_markup=build_program_keyboard(state["selected"], state["page"]))
-        return
-
-    if action == "prog_cancel":
-        user_analysis_state.pop(chat_id, None)
-        await query.answer("Bekor qilindi")
-        await query.edit_message_text("Bekor qilindi. Qayta boshlash uchun /start yozing.")
-        return
-
-    if action == "prog_done":
-        if not state["selected"]:
-            await query.answer("Kamida 1 ta yo'nalish tanlang ❌", show_alert=True)
-            return
-        await query.answer()
-        chosen_names = [programs[pid] for pid in state["selected"] if pid in programs]
-        score = state["score"]
-        user_analysis_state.pop(chat_id, None)
-        await query.edit_message_text("⏳ Tahlil qilinmoqda, biroz kuting...")
-
-        try:
-            result_text = await asyncio.to_thread(call_ai_analysis, score, chosen_names)
-        except Exception as e:
-            logger.warning(f"AI tahlil xatosi: {e}")
-            result_text = "❌ Tahlil qilishda xatolik yuz berdi. Birozdan so'ng qayta urinib ko'ring."
-
-        await context.bot.send_message(chat_id, result_text)
-        return
-
-
-def call_ai_analysis(score: float, chosen_programs: list[str]) -> str:
-    programs_list = "\n".join(f"{i+1}. {name}" for i, name in enumerate(chosen_programs))
-    system_prompt = (
-        "Siz O'zbekistondagi oliy ta'lim muassasalariga qabul jarayoni bo'yicha "
-        "yordamchi konsultantsiz. Foydalanuvchi to'plagan ball va tanlagan "
-        "yo'nalishlari asosida, o'sha yo'nalishlarga kirish ehtimoli haqida "
-        "taxminiy, ehtiyotkorlik bilan asoslangan fikr bering. Aniq rasmiy "
-        "ma'lumotlar bazasiga ega emasligingizni va bu faqat taxminiy tahlil "
-        "ekanini, rasmiy natija emasligini albatta ta'kidlang. Foydalanuvchini "
-        "aniq va rasmiy ma'lumot uchun UZBMB (Bilim va malakalarni baholash "
-        "agentligi)ning rasmiy 'mandat.uzbmb.uz' saytiga murojaat qilishni "
-        "maslahat bering. O'zbek tilida, qisqa, tushunarli va foydalanuvchini "
-        "keraksiz tashvishga solmaydigan uslubda yozing.\n\n"
-        "MUHIM FORMATLASH QOIDASI: Javobingizda HECH QANDAY Markdown belgisi "
-        "ishlatmang — ya'ni **qalin**, *qiya*, # sarlavha, - ro'yxat belgisi "
-        "kabi narsalarni yozmang, chunki bu Telegram'da xom holda ko'rinadi. "
-        "Buning o'rniga oddiy matn, tire (–) yoki emoji (✅, ⚠️, 📌) yordamida "
-        "tuzilma yarating. Har bir band nomini oddiy matn sifatida yozing, "
-        "yulduzcha bilan o'rab qo'ymang."
+    body += (
+        "\n\n📌 Bu ma'lumotlar o'tgan yilgi (taxminiy) ko'rsatkichlar asosida "
+        "berilmoqda, rasmiy natija emas."
     )
-    user_message = f"Mening to'plagan ballim: {score}\n\nTanlagan yo'nalishlarim:\n{programs_list}"
 
-    response = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": AI_MODEL,
-            "max_tokens": 700,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": user_message}],
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    data = response.json()
-    ai_text = data["content"][0]["text"]
-    # Xavfsizlik uchun: AI baribir markdown belgisi ishlatsa ham tozalaymiz
-    import re
-    ai_text = re.sub(r"#{1,6}\s*", "", ai_text)  # # ## ### sarlavhalar
-    ai_text = ai_text.replace("**", "").replace("__", "")  # qalin/qiya belgilar
-    ai_text = re.sub(r"\n{3,}", "\n\n", ai_text)  # ortiqcha bo'sh qatorlar
-    footer = (
-        "\n\n📌 Diqqat: bu — sun'iy intellekt tomonidan berilgan taxminiy fikr, "
-        "rasmiy natija emas. Aniq va rasmiy ma'lumotlar uchun UZBMB rasmiy saytiga murojaat qiling:\n"
-        "https://mandat.uzbmb.uz/Bakalavr/BallInfoByResult"
-    )
-    return ai_text + footer
+    if ad_text:
+        body += f"\n\n{ad_text}"
+
+    return body
+
+
+async def count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ADMIN_ID:
+        return
+    await update.message.reply_text(f"Hozirgi obunachilar soni: {len(subscribers)}")
 
 
 # ===========================================================
@@ -393,7 +303,8 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("📊 Statistika", callback_data="admin_stats"),
             ],
             [InlineKeyboardButton("📥 Ro'yxatni tiklash (import)", callback_data="admin_import")],
-            [InlineKeyboardButton("🎓 Yo'nalishlar (AI tahlil uchun)", callback_data="admin_programs")],
+            [InlineKeyboardButton("🎓 Yo'nalishlar (ball bazasi)", callback_data="admin_programs")],
+            [InlineKeyboardButton("📝 Reklama matni", callback_data="admin_ad")],
             [InlineKeyboardButton("❌ Yopish", callback_data="admin_close")],
         ]
     )
@@ -426,10 +337,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if action == "admin_stats":
         await query.answer()
+        scored = sum(1 for p in programs.values() if p.get("ball") is not None)
         await query.edit_message_text(
             f"📊 <b>Statistika</b>\n\n"
             f"Obunachilar soni: {len(subscribers)}\n"
-            f"Majburiy kanallar soni: {len(force_channels)}",
+            f"Majburiy kanallar soni: {len(force_channels)}\n"
+            f"Yo'nalishlar soni: {len(programs)} (balli: {scored})",
             parse_mode=ParseMode.HTML,
             reply_markup=admin_menu_keyboard(),
         )
@@ -497,6 +410,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if action == "admin_programs":
         await query.answer()
+        scored = sum(1 for p in programs.values() if p.get("ball") is not None)
         kb = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("➕ Yo'nalish qo'shish", callback_data="admin_add_program")],
@@ -506,8 +420,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             ]
         )
         await query.edit_message_text(
-            f"🎓 <b>Yo'nalishlar</b>\n\nHozircha: {len(programs)} ta yo'nalish kiritilgan.\n\n"
-            "Bular foydalanuvchi AI-tahlil so'raganda tanlash uchun ro'yxatda chiqadi.",
+            f"🎓 <b>Yo'nalishlar</b>\n\nJami: {len(programs)} ta, balli kiritilgan: {scored} ta.\n\n"
+            "Faqat balli kiritilgan yo'nalishlar Ball kalkulyatorida ishlatiladi.",
             parse_mode=ParseMode.HTML,
             reply_markup=kb,
         )
@@ -517,9 +431,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         admin_state[ADMIN_ID] = "awaiting_add_program"
         await query.answer()
         await query.edit_message_text(
-            "➕ Yangi yo'nalish nomini yuboring.\n"
-            "Masalan: <i>TATU — Dasturiy injiniring</i>\n\n"
-            "Bir nechtasini birdaniga qo'shish uchun har birini yangi qatordan yozing.\n\n"
+            "➕ Yangi yo'nalishlarni yuboring.\n\n"
+            "Format: <b>Nomi | Ball</b> (har biri yangi qatordan)\n"
+            "Masalan:\n"
+            "<code>TATU — Dasturiy injiniring | 165.2\n"
+            "ToshDTU — Iqtisodiyot | 148.7</code>\n\n"
+            "Ball kiritmasangiz ham bo'ladi (faqat nom yozing), lekin bunday "
+            "yo'nalish Ball kalkulyatorida ishlatilmaydi.\n\n"
             "Bekor qilish uchun /admin yozing.",
             parse_mode=ParseMode.HTML,
         )
@@ -528,7 +446,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if action == "admin_list_programs":
         await query.answer()
         if programs:
-            text = "📋 <b>Yo'nalishlar:</b>\n\n" + "\n".join(f"• {v}" for v in programs.values())
+            lines = []
+            for p in programs.values():
+                ball_str = str(p["ball"]) if p.get("ball") is not None else "ball yo'q"
+                lines.append(f"• {p['name']} — {ball_str}")
+            text = "📋 <b>Yo'nalishlar:</b>\n\n" + "\n".join(lines)
         else:
             text = "📋 Hozircha yo'nalish yo'q."
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_programs")]])
@@ -542,8 +464,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await query.edit_message_text("Hozircha yo'nalish yo'q.", reply_markup=kb)
             return
         rows = [
-            [InlineKeyboardButton(f"🗑 {name}", callback_data=f"delprog:{pid}")]
-            for pid, name in programs.items()
+            [InlineKeyboardButton(f"🗑 {p['name']}", callback_data=f"delprog:{pid}")]
+            for pid, p in programs.items()
         ]
         rows.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_programs")])
         await query.edit_message_text(
@@ -557,8 +479,32 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         save_programs(programs)
         await query.answer("O'chirildi ✅" if removed else "Topilmadi")
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_programs")]])
-        msg = f"✅ {removed} o'chirildi." if removed else "Bu yo'nalish topilmadi."
+        msg = f"✅ {removed['name']} o'chirildi." if removed else "Bu yo'nalish topilmadi."
         await query.edit_message_text(msg, reply_markup=kb)
+        return
+
+    if action == "admin_ad":
+        admin_state[ADMIN_ID] = "awaiting_ad_text"
+        await query.answer()
+        current = ad_text if ad_text else "(hozircha o'rnatilmagan)"
+        kb = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🗑 Reklamani o'chirish", callback_data="admin_ad_clear")]]
+        )
+        await query.edit_message_text(
+            f"📝 Hozirgi reklama matni:\n\n{current}\n\n"
+            "Ball kalkulyatori natijasi oxiriga qo'shiladigan yangi matnni yuboring.\n\n"
+            "Bekor qilish uchun /admin yozing.",
+            reply_markup=kb,
+        )
+        return
+
+    if action == "admin_ad_clear":
+        global ad_text
+        ad_text = ""
+        save_ad_text("")
+        admin_state.pop(ADMIN_ID, None)
+        await query.answer("Reklama o'chirildi ✅")
+        await query.edit_message_text("✅ Reklama matni o'chirildi.", reply_markup=admin_menu_keyboard())
         return
 
     if action == "admin_broadcast":
@@ -594,36 +540,30 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ---------------------------------------------------------
 # Matn/media xabarlarni holatga qarab yo'naltirish
 # ---------------------------------------------------------
-async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     message = update.message
 
-    # Avval: foydalanuvchi AI-tahlil uchun ball kiritish oqimidami?
-    a_state = user_analysis_state.get(user_id)
-    if a_state and a_state.get("stage") == "awaiting_score":
+    # 1) Foydalanuvchi Ball kalkulyatorida ball kutilyaptimi?
+    c_state = user_calc_state.get(user_id)
+    if c_state and c_state.get("stage") == "awaiting_score":
         text = (message.text or "").strip().replace(",", ".")
         try:
             score = float(text)
         except ValueError:
             await message.reply_text("Iltimos, faqat raqam yuboring. Masalan: 165.3")
             return
-        if not programs:
-            await message.reply_text("Hozircha yo'nalishlar ro'yxati kiritilmagan. Birozdan so'ng urinib ko'ring.")
-            user_analysis_state.pop(user_id, None)
-            return
-        user_analysis_state[user_id] = {"stage": "selecting", "score": score, "selected": [], "page": 0}
-        await message.reply_text(
-            f"Ball qabul qilindi: {score}\n\nEndi kamida 1, ko'pi bilan 5 ta yo'nalishni tanlang:",
-            reply_markup=build_program_keyboard([], 0),
-        )
+        user_calc_state.pop(user_id, None)
+        await message.reply_text(format_calc_result(score))
         return
 
+    # 2) Qolgani faqat admin uchun
     if user_id != ADMIN_ID:
         return
 
     state = admin_state.get(ADMIN_ID)
     if not state:
-        return  # Admin oddiy foydalanuvchi kabi yozayotgan bo'lishi mumkin
+        return
 
     if state == "awaiting_add_channel":
         text = (message.text or "").strip()
@@ -641,18 +581,41 @@ async def admin_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not lines:
             await message.reply_text("Bo'sh matn. Qaytadan yuboring.")
             return
+        added = 0
         for line in lines:
-            programs[uuid.uuid4().hex[:8]] = line
+            if "|" in line:
+                name_part, ball_part = line.rsplit("|", 1)
+                name = name_part.strip()
+                ball_part = ball_part.strip().replace(",", ".")
+                try:
+                    ball = float(ball_part)
+                except ValueError:
+                    ball = None
+            else:
+                name = line.strip()
+                ball = None
+            if not name:
+                continue
+            programs[uuid.uuid4().hex[:8]] = {"name": name, "ball": ball}
+            added += 1
         save_programs(programs)
         admin_state.pop(ADMIN_ID, None)
         await message.reply_text(
-            f"✅ {len(lines)} ta yo'nalish qo'shildi. Jami: {len(programs)} ta.",
+            f"✅ {added} ta yo'nalish qo'shildi. Jami: {len(programs)} ta.",
             reply_markup=admin_menu_keyboard(),
         )
         return
 
+    if state == "awaiting_ad_text":
+        new_text = (message.text or "").strip()
+        global ad_text
+        ad_text = new_text
+        save_ad_text(new_text)
+        admin_state.pop(ADMIN_ID, None)
+        await message.reply_text("✅ Reklama matni saqlandi.", reply_markup=admin_menu_keyboard())
+        return
+
     if state == "awaiting_import":
-        import re
         text = message.text or ""
         ids = {int(x) for x in re.findall(r"-?\d{5,}", text)}
         if not ids:
@@ -727,12 +690,6 @@ async def send_to_all(
     return sent, failed
 
 
-async def count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id != ADMIN_ID:
-        return
-    await update.message.reply_text(f"Hozirgi obunachilar soni: {len(subscribers)}")
-
-
 def main() -> None:
     app = Application.builder().token(TOKEN).build()
 
@@ -741,10 +698,12 @@ def main() -> None:
     app.add_handler(CommandHandler("soni", count))
     app.add_handler(CallbackQueryHandler(check_subscription, pattern="^check_sub$"))
     app.add_handler(CallbackQueryHandler(toggle_subscription, pattern="^toggle_sub$"))
-    app.add_handler(CallbackQueryHandler(start_analysis, pattern="^start_analysis$"))
-    app.add_handler(CallbackQueryHandler(analysis_callback, pattern="^(prog_toggle:|prog_page:|prog_done|prog_cancel)"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(admin_|delch:|delprog:|confirm_broadcast|cancel_broadcast)"))
-    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.VIDEO) & ~filters.COMMAND, admin_input_handler))
+    app.add_handler(CallbackQueryHandler(start_calc, pattern="^start_calc$"))
+    app.add_handler(CallbackQueryHandler(
+        admin_callback,
+        pattern="^(admin_|delch:|delprog:|confirm_broadcast|cancel_broadcast)"
+    ))
+    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.VIDEO) & ~filters.COMMAND, universal_input_handler))
 
     logger.info("Bot ishga tushdi...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
