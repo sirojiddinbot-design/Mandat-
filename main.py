@@ -1,7 +1,9 @@
+import asyncio
 import json
 import logging
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 
@@ -170,18 +172,37 @@ def append_ad(text: str, place: str) -> str:
 
 
 # ---------------------------------------------------------
-# Majburiy obuna
+# Majburiy obuna (kesh bilan — tezkor ishlashi uchun)
 # ---------------------------------------------------------
-async def get_missing_channels(bot, user_id: int) -> list[str]:
-    missing = []
-    for channel in force_channels:
+# Foydalanuvchi a'zoligi natijasini vaqtincha eslab qolamiz,
+# shunda har tugma bosilganda Telegram'ga qayta so'rov ketmaydi.
+_membership_cache: dict[int, tuple[float, list[str]]] = {}
+MEMBERSHIP_CACHE_SECONDS = 300  # 5 daqiqa
+
+
+async def get_missing_channels(bot, user_id: int, use_cache: bool = True) -> list[str]:
+    if not force_channels:
+        return []
+
+    now = time.time()
+    if use_cache:
+        cached = _membership_cache.get(user_id)
+        if cached and now - cached[0] < MEMBERSHIP_CACHE_SECONDS:
+            return cached[1]
+
+    # Barcha kanallarni parallel tekshiramiz (ketma-ket emas — ancha tez)
+    async def check(channel: str) -> str | None:
         try:
             member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
-            if member.status in ("left", "kicked"):
-                missing.append(channel)
+            return channel if member.status in ("left", "kicked") else None
         except Exception as e:
             logger.warning(f"{channel} tekshirilmadi: {e}")
-            missing.append(channel)
+            return channel
+
+    results = await asyncio.gather(*(check(c) for c in force_channels))
+    missing = [c for c in results if c]
+
+    _membership_cache[user_id] = (now, missing)
     return missing
 
 
@@ -234,7 +255,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     chat_id = query.message.chat_id
-    missing = await get_missing_channels(context.bot, chat_id)
+    # "Tekshirdim" bosilganda keshni ishlatmaymiz — foydalanuvchi hozirgina
+    # obuna bo'lgan bo'lishi mumkin, shuning uchun yangidan tekshiramiz.
+    missing = await get_missing_channels(context.bot, chat_id, use_cache=False)
     if missing:
         await query.answer("Hali barcha kanallarga obuna bo'lmadingiz ❌", show_alert=True)
         await safe_edit_markup(query.message, reply_markup=build_subscription_keyboard(missing))
@@ -832,8 +855,16 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def send_to_all(bot, text: str = "", photo_id: str | None = None, video_id: str | None = None):
+    """Xabarni barcha obunachilarga yuboradi.
+    Telegram sekundiga ~30 ta xabarga ruxsat beradi, shuning uchun
+    kichik guruhlarga bo'lib, orasida qisqa pauza bilan yuboramiz —
+    bu ham tez, ham bloklanmaydi."""
     sent, failed = 0, 0
-    for chat_id in list(subscribers):
+    blocked: list[int] = []
+    targets = list(subscribers)
+    BATCH = 25
+
+    async def send_one(chat_id: int) -> str:
         try:
             if photo_id:
                 await bot.send_photo(chat_id=chat_id, photo=photo_id, caption=text or None)
@@ -841,19 +872,37 @@ async def send_to_all(bot, text: str = "", photo_id: str | None = None, video_id
                 await bot.send_video(chat_id=chat_id, video=video_id, caption=text or None)
             else:
                 await bot.send_message(chat_id=chat_id, text=text)
-            sent += 1
+            return "ok"
         except Forbidden:
-            subscribers.discard(chat_id)
-            save_json_set(SUBS_FILE, subscribers)
-            failed += 1
+            blocked.append(chat_id)
+            return "blocked"
         except Exception as e:
             logger.warning(f"Yuborilmadi {chat_id}: {e}")
-            failed += 1
+            return "error"
+
+    for i in range(0, len(targets), BATCH):
+        chunk = targets[i:i + BATCH]
+        results = await asyncio.gather(*(send_one(cid) for cid in chunk))
+        sent += results.count("ok")
+        failed += len(results) - results.count("ok")
+        await asyncio.sleep(1)  # Telegram limitiga rioya qilish
+
+    # Botni bloklagan foydalanuvchilarni ro'yxatdan bir marta o'chiramiz
+    if blocked:
+        for cid in blocked:
+            subscribers.discard(cid)
+        save_json_set(SUBS_FILE, subscribers)
+
     return sent, failed
 
 
 def main() -> None:
-    app = Application.builder().token(TOKEN).build()
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .concurrent_updates(True)  # Bir vaqtda bir nechta foydalanuvchiga xizmat qiladi
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
