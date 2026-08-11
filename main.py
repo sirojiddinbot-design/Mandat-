@@ -336,7 +336,13 @@ def call_ai_analysis(score: float, chosen_programs: list[str]) -> str:
         "aniq va rasmiy ma'lumot uchun UZBMB (Bilim va malakalarni baholash "
         "agentligi)ning rasmiy 'mandat.uzbmb.uz' saytiga murojaat qilishni "
         "maslahat bering. O'zbek tilida, qisqa, tushunarli va foydalanuvchini "
-        "keraksiz tashvishga solmaydigan uslubda yozing."
+        "keraksiz tashvishga solmaydigan uslubda yozing.\n\n"
+        "MUHIM FORMATLASH QOIDASI: Javobingizda HECH QANDAY Markdown belgisi "
+        "ishlatmang — ya'ni **qalin**, *qiya*, # sarlavha, - ro'yxat belgisi "
+        "kabi narsalarni yozmang, chunki bu Telegram'da xom holda ko'rinadi. "
+        "Buning o'rniga oddiy matn, tire (–) yoki emoji (✅, ⚠️, 📌) yordamida "
+        "tuzilma yarating. Har bir band nomini oddiy matn sifatida yozing, "
+        "yulduzcha bilan o'rab qo'ymang."
     )
     user_message = f"Mening to'plagan ballim: {score}\n\nTanlagan yo'nalishlarim:\n{programs_list}"
 
@@ -358,6 +364,8 @@ def call_ai_analysis(score: float, chosen_programs: list[str]) -> str:
     response.raise_for_status()
     data = response.json()
     ai_text = data["content"][0]["text"]
+    # Xavfsizlik uchun: AI baribir markdown belgisi ishlatsa ham tozalaymiz
+    ai_text = ai_text.replace("**", "").replace("##", "").replace("###", "")
     footer = (
         "\n\n📌 Diqqat: bu — sun'iy intellekt tomonidan berilgan taxminiy fikr, "
         "rasmiy natija emas. Aniq va rasmiy ma'lumotlar uchun UZBMB rasmiy saytiga murojaat qiling:\n"
