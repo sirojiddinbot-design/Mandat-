@@ -365,7 +365,10 @@ def call_ai_analysis(score: float, chosen_programs: list[str]) -> str:
     data = response.json()
     ai_text = data["content"][0]["text"]
     # Xavfsizlik uchun: AI baribir markdown belgisi ishlatsa ham tozalaymiz
-    ai_text = ai_text.replace("**", "").replace("##", "").replace("###", "")
+    import re
+    ai_text = re.sub(r"#{1,6}\s*", "", ai_text)  # # ## ### sarlavhalar
+    ai_text = ai_text.replace("**", "").replace("__", "")  # qalin/qiya belgilar
+    ai_text = re.sub(r"\n{3,}", "\n\n", ai_text)  # ortiqcha bo'sh qatorlar
     footer = (
         "\n\n📌 Diqqat: bu — sun'iy intellekt tomonidan berilgan taxminiy fikr, "
         "rasmiy natija emas. Aniq va rasmiy ma'lumotlar uchun UZBMB rasmiy saytiga murojaat qiling:\n"
