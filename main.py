@@ -7,7 +7,12 @@ import time
 import uuid
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden
 from telegram.ext import (
@@ -210,25 +215,52 @@ def build_subscription_keyboard(missing: list[str]) -> InlineKeyboardMarkup:
     rows = []
     for channel in missing:
         username = channel.lstrip("@")
-        rows.append([InlineKeyboardButton(f"➕ {channel}", url=f"https://t.me/{username}")])
-    rows.append([InlineKeyboardButton("✅ Tekshirdim", callback_data="check_sub")])
+        rows.append([InlineKeyboardButton(f"📢  {channel}", url=f"https://t.me/{username}")])
+    rows.append([InlineKeyboardButton("✅  Tekshirdim", callback_data="check_sub")])
     return InlineKeyboardMarkup(rows)
 
 
-async def show_main_menu(chat_id: int, bot, edit_message=None) -> None:
+def main_reply_keyboard() -> ReplyKeyboardMarkup:
+    """Pastdagi doimiy menyu — har doim ko'rinib turadi."""
+    return ReplyKeyboardMarkup(
+        [
+            ["🧮 Ball kalkulyatori"],
+            ["💰 Superkontrakt", "🔔 Eslatma"],
+            ["ℹ️ Yordam"],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+async def show_main_menu(chat_id: int, bot, edit_message=None, user_name: str = "") -> None:
     is_subscribed = chat_id in subscribers
     button_text = "🔕 Eslatmani o'chirish" if is_subscribed else "🔔 Eslatmani yoqish"
     keyboard = InlineKeyboardMarkup(
         [
+            [InlineKeyboardButton("🧮  Ball kalkulyatori", callback_data="start_calc")],
+            [InlineKeyboardButton("💰  Superkontrakt hisoblash", callback_data="start_super")],
             [InlineKeyboardButton(button_text, callback_data="toggle_sub")],
-            [InlineKeyboardButton("🧮 Ball kalkulyatori", callback_data="start_calc")],
         ]
     )
+
+    salom = f"Assalomu alaykum, {user_name}! 👋\n\n" if user_name else "Assalomu alaykum! 👋\n\n"
+    holat = "✅ Yoqilgan" if is_subscribed else "⚪️ O'chirilgan"
+
     text = (
-        "📣 <b>Mandat natijalari haqida xabardor bo'lish</b>\n\n"
-        "Quyidagi tugmalardan birini tanlang:\n\n"
-        "🔔 <b>Eslatmani yoqish</b> — yakuniy natijalar e'lon qilinganda tezkor xabar olasiz\n"
-        "🧮 <b>Ball kalkulyatori</b> — to'plagan ballingiz asosida mos yo'nalishlarni bilib olasiz"
+        f"{salom}"
+        "🎓 <b>MANDAT 2026</b>\n"
+        "<i>Abituriyentlar uchun yordamchi</i>\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "🧮 <b>Ball kalkulyatori</b>\n"
+        "<i>Ballingizga mos yo'nalishlarni bir zumda aniqlang</i>\n\n"
+        "💰 <b>Superkontrakt hisoblash</b>\n"
+        "<i>Ball yetmasa — to'lov necha barobar bo'lishini biling</i>\n\n"
+        "🔔 <b>Natija eslatmasi</b>\n"
+        "<i>Mandat e'lon qilinishi bilan xabar olasiz</i>\n"
+        f"Holat: {holat}\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "👇 Quyidagi tugmalardan birini tanlang"
     )
     text = append_ad(text, "start")
 
@@ -240,16 +272,28 @@ async def show_main_menu(chat_id: int, bot, edit_message=None) -> None:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    user_name = update.effective_user.first_name or ""
+
     if force_channels:
         missing = await get_missing_channels(context.bot, chat_id)
         if missing:
             await update.message.reply_text(
-                "⚠️ Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling, "
-                "so'ng «✅ Tekshirdim» tugmasini bosing:",
+                "🔐 <b>Bir qadam qoldi!</b>\n"
+                "━━━━━━━━━━━━━━━\n\n"
+                "Botdan bepul foydalanish uchun quyidagi kanal(lar)ga a'zo bo'ling:\n\n"
+                "<i>A'zo bo'lgach «✅ Tekshirdim» tugmasini bosing</i>",
+                parse_mode=ParseMode.HTML,
                 reply_markup=build_subscription_keyboard(missing),
             )
             return
-    await show_main_menu(chat_id, context.bot)
+
+    # Pastdagi doimiy klaviaturani bir marta o'rnatamiz
+    await context.bot.send_message(
+        chat_id,
+        "⌨️ Pastdagi tugmalar orqali tez kirishingiz mumkin.",
+        reply_markup=main_reply_keyboard(),
+    )
+    await show_main_menu(chat_id, context.bot, user_name=user_name)
 
 
 async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -259,11 +303,17 @@ async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # obuna bo'lgan bo'lishi mumkin, shuning uchun yangidan tekshiramiz.
     missing = await get_missing_channels(context.bot, chat_id, use_cache=False)
     if missing:
-        await query.answer("Hali barcha kanallarga obuna bo'lmadingiz ❌", show_alert=True)
+        await query.answer("❌ Hali barcha kanallarga a'zo bo'lmadingiz", show_alert=True)
         await safe_edit_markup(query.message, reply_markup=build_subscription_keyboard(missing))
         return
-    await query.answer("Obuna tasdiqlandi ✅")
-    await show_main_menu(chat_id, context.bot, edit_message=query.message)
+    await query.answer("✅ Rahmat! Xush kelibsiz")
+    await context.bot.send_message(
+        chat_id,
+        "⌨️ Pastdagi tugmalar orqali tez kirishingiz mumkin.",
+        reply_markup=main_reply_keyboard(),
+    )
+    await show_main_menu(chat_id, context.bot, edit_message=query.message,
+                         user_name=query.from_user.first_name or "")
 
 
 async def toggle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -272,18 +322,22 @@ async def toggle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
     if force_channels:
         missing = await get_missing_channels(context.bot, chat_id)
         if missing:
-            await query.answer("Avval kanallarga obuna bo'ling ❌", show_alert=True)
+            await query.answer("❌ Avval kanallarga a'zo bo'ling", show_alert=True)
             await safe_edit_markup(query.message, reply_markup=build_subscription_keyboard(missing))
             return
     if chat_id in subscribers:
         subscribers.remove(chat_id)
         save_json_set(SUBS_FILE, subscribers)
-        await query.answer("Eslatma o'chirildi")
+        await query.answer("🔕 Eslatma o'chirildi", show_alert=True)
     else:
         subscribers.add(chat_id)
         save_json_set(SUBS_FILE, subscribers)
-        await query.answer("Eslatma yoqildi ✅")
-    await show_main_menu(chat_id, context.bot, edit_message=query.message)
+        await query.answer(
+            "🔔 Eslatma yoqildi!\n\nNatijalar e'lon qilinishi bilan sizga xabar yuboriladi.",
+            show_alert=True,
+        )
+    await show_main_menu(chat_id, context.bot, edit_message=query.message,
+                         user_name=query.from_user.first_name or "")
 
 
 # ===========================================================
@@ -295,8 +349,8 @@ def get_all_fans() -> list[str]:
 
 
 def build_fan_keyboard() -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(f, callback_data=f"calcfan:{f}")] for f in get_all_fans()]
-    rows.append([InlineKeyboardButton("❌ Bekor qilish", callback_data="calc_cancel")])
+    rows = [[InlineKeyboardButton(f"📚  {f}", callback_data=f"calcfan:{f}")] for f in get_all_fans()]
+    rows.append([InlineKeyboardButton("◀️  Bosh menyu", callback_data="calc_cancel")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -307,12 +361,14 @@ async def start_calc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not fans:
         await query.answer()
         await query.message.reply_text(
-            "Hozircha yo'nalishlar bazasi to'ldirilmagan. Birozdan so'ng qayta urinib ko'ring."
+            "⏳ Yo'nalishlar bazasi hozircha to'ldirilmoqda.\nBirozdan so'ng qayta urinib ko'ring."
         )
         return
     await query.answer()
     await query.message.reply_text(
-        "🧮 <b>Ball kalkulyatori</b>\n\nAvval fanlar majmuangizni tanlang:",
+        "🧮 <b>BALL KALKULYATORI</b>\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "<b>1-qadam:</b> Fanlar majmuangizni tanlang 👇",
         parse_mode=ParseMode.HTML,
         reply_markup=build_fan_keyboard(),
     )
@@ -325,8 +381,10 @@ async def calc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if action == "calc_cancel":
         user_calc_state.pop(chat_id, None)
-        await query.answer("Bekor qilindi")
-        await safe_edit_text(query.message, "Bekor qilindi. Qayta boshlash uchun /start yozing.")
+        user_super_state.pop(chat_id, None)
+        await query.answer()
+        await safe_edit_text(query.message, "◀️ Bosh menyuga qaytdingiz.")
+        await show_main_menu(chat_id, context.bot)
         return
 
     if action.startswith("calcfan:"):
@@ -335,11 +393,66 @@ async def calc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.answer()
         await safe_edit_text(
             query.message,
-            f"✅ Tanlangan fanlar: <b>{fan}</b>\n\n"
-            "Endi to'plagan umumiy ballingizni kiriting.\nMasalan: 165.3",
+            "🧮 <b>BALL KALKULYATORI</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            f"📚 Fanlar: <b>{fan}</b>\n\n"
+            "<b>2-qadam:</b> To'plagan umumiy ballingizni yozing\n\n"
+            "<i>Masalan: 165.3</i>",
             parse_mode=ParseMode.HTML,
         )
         return
+
+
+def superkontrakt_koeffitsiyent(farq: float) -> tuple[float | None, str]:
+    """Ball farqiga qarab superkontrakt koeffitsiyentini qaytaradi.
+    farq — o'tish balliga qancha ball yetmagani (musbat son)."""
+    if farq <= 0:
+        return None, ""
+    if farq <= 1.05:
+        return 1.5, "1,05 ballgacha yetmaganlar"
+    if farq <= 2.05:
+        return 2.0, "1,06–2,05 ball yetmaganlar"
+    if farq <= 3.05:
+        return 2.5, "2,06–3,05 ball yetmaganlar"
+    if farq <= 4.05:
+        return 3.0, "3,06–4,05 ball yetmaganlar"
+    return None, "4,05 balldan ortiq"
+
+
+def format_super_result(score: float, fan: str) -> str:
+    """Ballga yetmagan, lekin superkontrakt imkoniyati bor yo'nalishlar."""
+    kandidatlar = []
+    for p in programs.values():
+        if p.get("ball") is None or p.get("fan") != fan:
+            continue
+        farq = round(p["ball"] - score, 2)
+        if 0 < farq <= 4.05:
+            koef, _ = superkontrakt_koeffitsiyent(farq)
+            if koef:
+                kandidatlar.append((p, farq, koef))
+
+    if not kandidatlar:
+        return ""
+
+    kandidatlar.sort(key=lambda x: x[1])
+    lines = [
+        "\n\n💰 <b>SUPERKONTRAKT IMKONIYATI</b>",
+        "━━━━━━━━━━━━━━━",
+        "<i>Quyidagi yo'nalishlarga ballingiz sal yetmadi, lekin "
+        "superkontrakt asosida o'qish imkoniyati bor:</i>\n",
+    ]
+    for p, farq, koef in kandidatlar[:10]:
+        koef_str = str(koef).replace(".", ",")
+        lines.append(
+            f"🔸 <b>{p['name']}</b>\n"
+            f"     └ O'tish balli: {p['ball']}  ·  <b>{farq}</b> ball yetmadi\n"
+            f"     └ To'lov: bazaviy kontraktning <b>{koef_str} barobari</b>"
+        )
+    lines.append(
+        "\n📐 <i>Aniq summani bilish uchun «💰 Superkontrakt hisoblash» "
+        "tugmasidan foydalaning.</i>"
+    )
+    return "\n".join(lines)
 
 
 def format_calc_result(score: float, fan: str) -> str:
@@ -351,35 +464,130 @@ def format_calc_result(score: float, fan: str) -> str:
 
     all_in_fan = [p for p in programs.values() if p.get("fan") == fan and p.get("ball") is not None]
 
+    header = (
+        "📊 <b>NATIJA</b>\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"🎯 Sizning ballingiz: <b>{score}</b>\n"
+        f"📚 Fanlar: <b>{fan}</b>\n"
+        "━━━━━━━━━━━━━━━\n\n"
+    )
+
     if not matches:
         min_ball = min((p["ball"] for p in all_in_fan), default=None)
-        body = (
-            f"🧮 Ballingiz: {score}\n"
-            f"📚 Fanlar: {fan}\n\n"
-            "❌ Afsuski, bu fanlar majmuasida ballingizga mos yo'nalish topilmadi."
-        )
+        body = header + "😔 Afsuski, bu fanlar bo'yicha ballingizga mos yo'nalish topilmadi."
         if min_ball is not None:
-            body += f"\n\nEng past o'tish balli: {min_ball}"
+            farq = round(min_ball - score, 1)
+            body += (
+                f"\n\n📉 Eng past o'tish balli: <b>{min_ball}</b>\n"
+                f"Sizga yana <b>{farq}</b> ball yetishmayapti."
+            )
+        body += "\n\n💡 Boshqa fanlar majmuasini ham tekshirib ko'ring."
     else:
-        lines = [
-            f"🧮 Ballingiz: {score}",
-            f"📚 Fanlar: {fan}",
-            "",
-            f"✅ Mos keladigan yo'nalishlar ({len(matches)} ta):",
-            "",
-        ]
-        for p in matches[:30]:
+        lines = [header, f"✅ Sizga mos <b>{len(matches)} ta</b> yo'nalish topildi:\n"]
+        for i, p in enumerate(matches[:25], 1):
             farq = round(score - p["ball"], 1)
-            lines.append(f"• {p['name']}\n   O'tish balli: {p['ball']} (sizda +{farq})")
-        if len(matches) > 30:
-            lines.append(f"\n... va yana {len(matches) - 30} ta yo'nalish.")
+            if farq >= 20:
+                belgi = "🟢"
+            elif farq >= 5:
+                belgi = "🟡"
+            else:
+                belgi = "🟠"
+            lines.append(
+                f"{belgi} <b>{i}. {p['name']}</b>\n"
+                f"     └ O'tish balli: {p['ball']}  ·  sizda <b>+{farq}</b>"
+            )
+        if len(matches) > 25:
+            lines.append(f"\n<i>... va yana {len(matches) - 25} ta yo'nalish</i>")
+        lines.append(
+            "\n🟢 Ishonchli  ·  🟡 O'rtacha  ·  🟠 Chegaraga yaqin"
+        )
         body = "\n".join(lines)
 
+    # Superkontrakt imkoniyati bo'lgan yo'nalishlarni ham qo'shamiz
+    body += format_super_result(score, fan)
+
     body += (
-        "\n\n📌 Bu ma'lumotlar 2025/2026 o'quv yili ko'rsatkichlari asosida berilmoqda "
-        "va taxminiy xarakterga ega. Rasmiy ma'lumot uchun: https://mandat.uzbmb.uz"
+        "\n\n━━━━━━━━━━━━━━━\n"
+        "📌 <i>2025/2026 ko'rsatkichlari asosida taxminiy hisob. "
+        "Rasmiy ma'lumot: mandat.uzbmb.uz</i>"
     )
     return append_ad(body, "result")
+
+
+# ===========================================================
+# SUPERKONTRAKT HISOBLAGICHI
+# ===========================================================
+user_super_state: dict[int, dict] = {}
+
+
+async def start_super(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    chat_id = query.message.chat_id
+    user_super_state[chat_id] = {"stage": "awaiting_farq"}
+    await query.answer()
+    await query.message.reply_text(
+        "💰 <b>SUPERKONTRAKT HISOBLAGICHI</b>\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "<b>1-qadam:</b> O'tish balliga necha ball yetmaganini yozing\n\n"
+        "<i>Masalan: 2.4</i>\n\n"
+        "<i>(Ya'ni: o'tish balli 130, sizda 127.6 bo'lsa → 2.4 deb yozing)</i>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+def format_super_calc(farq: float, bazaviy: float | None = None) -> str:
+    koef, izoh = superkontrakt_koeffitsiyent(farq)
+
+    if farq <= 0:
+        return (
+            "✅ Ballingiz yetarli ekan — superkontrakt kerak emas!\n\n"
+            "Oddiy kontrakt asosida o'qishingiz mumkin."
+        )
+
+    if koef is None:
+        return (
+            "💰 <b>SUPERKONTRAKT</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            f"📉 Yetmagan ball: <b>{farq}</b>\n\n"
+            "⚠️ 4,05 balldan ortiq yetmagan bo'lsangiz, superkontrakt miqdorini "
+            "OTM rektori mustaqil belgilaydi.\n\n"
+            "Qonun bo'yicha u bazaviy kontraktning <b>3 barobaridan kam</b> "
+            "bo'lmasligi kerak, lekin aniq miqdorni faqat OTM qabul "
+            "komissiyasidan bilib olishingiz mumkin.\n\n"
+            "📞 <i>OTM qabul komissiyasiga murojaat qiling.</i>"
+        )
+
+    koef_str = str(koef).replace(".", ",")
+    body = (
+        "💰 <b>SUPERKONTRAKT</b>\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        f"📉 Yetmagan ball: <b>{farq}</b>\n"
+        f"📋 Toifa: {izoh}\n"
+        f"📐 Koeffitsiyent: <b>{koef_str} barobar</b>\n"
+        "━━━━━━━━━━━━━━━\n\n"
+    )
+
+    if bazaviy:
+        summa = bazaviy * koef
+        body += (
+            f"💵 Bazaviy kontrakt: <b>{bazaviy:,.0f}</b> so'm\n"
+            f"💰 Superkontrakt: <b>{summa:,.0f}</b> so'm\n\n"
+        ).replace(",", " ")
+    else:
+        body += (
+            "💵 Aniq summani bilish uchun yo'nalishingizning "
+            "<b>bazaviy kontrakt narxini</b> yozing (so'mda).\n\n"
+            "<i>Masalan: 15000000</i>\n\n"
+            "<i>Bazaviy narxni OTM saytidan yoki qabul komissiyasidan bilib olasiz.</i>"
+        )
+
+    body += (
+        "\n━━━━━━━━━━━━━━━\n"
+        "📌 <i>Bu — qonundagi minimal koeffitsiyent asosida hisob. "
+        "OTM'lar narxni mustaqil belgilashi mumkin, shuning uchun aniq summani "
+        "qabul komissiyasidan tasdiqlang.</i>"
+    )
+    return body
 
 
 async def count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -736,20 +944,143 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     message = update.message
+    raw_text = (message.text or "").strip()
 
-    # Ball kalkulyatori
+    # --- Pastdagi doimiy klaviatura tugmalari ---
+    if raw_text == "🧮 Ball kalkulyatori":
+        fans = get_all_fans()
+        if not fans:
+            await message.reply_text("⏳ Yo'nalishlar bazasi to'ldirilmoqda. Birozdan so'ng urinib ko'ring.")
+            return
+        await message.reply_text(
+            "🧮 <b>BALL KALKULYATORI</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "<b>1-qadam:</b> Fanlar majmuangizni tanlang 👇",
+            parse_mode=ParseMode.HTML,
+            reply_markup=build_fan_keyboard(),
+        )
+        return
+
+    if raw_text == "💰 Superkontrakt":
+        user_super_state[user_id] = {"stage": "awaiting_farq"}
+        await message.reply_text(
+            "💰 <b>SUPERKONTRAKT HISOBLAGICHI</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "<b>1-qadam:</b> O'tish balliga necha ball yetmaganini yozing\n\n"
+            "<i>Masalan: 2.4</i>\n\n"
+            "<i>(Ya'ni: o'tish balli 130, sizda 127.6 bo'lsa → 2.4 deb yozing)</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if raw_text == "🔔 Eslatma":
+        await show_main_menu(user_id, context.bot)
+        return
+
+    if raw_text == "ℹ️ Yordam":
+        await message.reply_text(
+            "ℹ️ <b>YORDAM</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "🧮 <b>Ball kalkulyatori</b>\n"
+            "Fanlar majmuangizni tanlab, ballingizni kiritasiz — sizga mos "
+            "yo'nalishlar ro'yxati chiqadi.\n\n"
+            "🔔 <b>Eslatma</b>\n"
+            "Yoqib qo'ysangiz, mandat natijalari e'lon qilinishi bilan bot sizga "
+            "avtomatik xabar yuboradi.\n\n"
+            "━━━━━━━━━━━━━━━\n"
+            "📌 Ma'lumotlar 2025/2026 ko'rsatkichlari asosida taxminiy hisoblanadi.\n"
+            "Rasmiy manba: mandat.uzbmb.uz\n\n"
+            "🔄 Botni qayta ishga tushirish: /start",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+        return
+
+    # --- Ball kalkulyatori ---
     c_state = user_calc_state.get(user_id)
     if c_state and c_state.get("stage") == "awaiting_score":
-        text = (message.text or "").strip().replace(",", ".")
+        text = raw_text.replace(",", ".")
         try:
             score = float(text)
         except ValueError:
-            await message.reply_text("Iltimos, faqat raqam yuboring. Masalan: 165.3")
+            await message.reply_text(
+                "⚠️ Iltimos, faqat raqam yuboring.\n\n<i>Masalan: 165.3</i>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        if score < 0 or score > 500:
+            await message.reply_text("⚠️ Ball 0 va 500 oralig'ida bo'lishi kerak.")
             return
         fan = c_state.get("fan", "")
         user_calc_state.pop(user_id, None)
-        await message.reply_text(format_calc_result(score, fan), disable_web_page_preview=True)
+        again_kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🔄  Qayta hisoblash", callback_data="start_calc")],
+                [InlineKeyboardButton("◀️  Bosh menyu", callback_data="calc_cancel")],
+            ]
+        )
+        await message.reply_text(
+            format_calc_result(score, fan),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=again_kb,
+        )
         return
+
+    # --- Superkontrakt hisoblagichi ---
+    s_state = user_super_state.get(user_id)
+    if s_state:
+        text = raw_text.replace(",", ".").replace(" ", "")
+        try:
+            son = float(text)
+        except ValueError:
+            await message.reply_text(
+                "⚠️ Iltimos, faqat raqam yuboring.", parse_mode=ParseMode.HTML
+            )
+            return
+
+        if s_state.get("stage") == "awaiting_farq":
+            if son < 0 or son > 200:
+                await message.reply_text("⚠️ Noto'g'ri qiymat. Qaytadan urinib ko'ring.")
+                return
+            koef, _ = superkontrakt_koeffitsiyent(son)
+            if koef is None or son <= 0:
+                user_super_state.pop(user_id, None)
+                await message.reply_text(
+                    format_super_calc(son),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("◀️  Bosh menyu", callback_data="calc_cancel")]]
+                    ),
+                )
+                return
+            user_super_state[user_id] = {"stage": "awaiting_bazaviy", "farq": son}
+            await message.reply_text(
+                format_super_calc(son),
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        if s_state.get("stage") == "awaiting_bazaviy":
+            if son < 100000 or son > 200000000:
+                await message.reply_text(
+                    "⚠️ Kontrakt summasini so'mda yozing.\n\n<i>Masalan: 15000000</i>",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            farq = s_state.get("farq", 0)
+            user_super_state.pop(user_id, None)
+            await message.reply_text(
+                format_super_calc(farq, son),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("🔄  Qayta hisoblash", callback_data="start_super")],
+                        [InlineKeyboardButton("◀️  Bosh menyu", callback_data="calc_cancel")],
+                    ]
+                ),
+            )
+            return
 
     if user_id != ADMIN_ID:
         return
@@ -910,6 +1241,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(check_subscription, pattern="^check_sub$"))
     app.add_handler(CallbackQueryHandler(toggle_subscription, pattern="^toggle_sub$"))
     app.add_handler(CallbackQueryHandler(start_calc, pattern="^start_calc$"))
+    app.add_handler(CallbackQueryHandler(start_super, pattern="^start_super$"))
     app.add_handler(CallbackQueryHandler(calc_callback, pattern="^(calcfan:|calc_cancel)"))
     app.add_handler(CallbackQueryHandler(
         admin_callback,
