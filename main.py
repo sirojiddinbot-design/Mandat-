@@ -42,6 +42,7 @@ SUBS_FILE = BASE_DIR / "subscribers.json"
 CHANNELS_FILE = BASE_DIR / "channels.json"
 PROGRAMS_FILE = BASE_DIR / "programs.json"
 ADS_FILE = BASE_DIR / "ads.json"
+ORDERS_FILE = BASE_DIR / "orders.json"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -139,6 +140,43 @@ def save_ads(data: dict) -> None:
 
 ads: dict = load_ads()
 
+
+# ---------------------------------------------------------
+# Buyurtmalar (abituriyent ID ro'yxati)
+# Faqat ID raqami saqlanadi — hech qanday shaxsiy ma'lumot emas.
+# {"counter": int, "items": {"<user_id>": [{"abit_id": str, "order_no": int}]}}
+# ---------------------------------------------------------
+def load_orders() -> dict:
+    if ORDERS_FILE.exists():
+        data = json.loads(ORDERS_FILE.read_text())
+        return {"counter": data.get("counter", 0), "items": data.get("items", {})}
+    return {"counter": 0, "items": {}}
+
+
+def save_orders(data: dict) -> None:
+    ORDERS_FILE.write_text(json.dumps(data, ensure_ascii=False))
+
+
+orders: dict = load_orders()
+
+
+def add_order(user_id: int, abit_id: str) -> tuple[int, bool]:
+    """Buyurtma qo'shadi. Qaytaradi: (tartib raqami, yangi_mi)"""
+    key = str(user_id)
+    user_orders = orders["items"].setdefault(key, [])
+    for o in user_orders:
+        if o["abit_id"] == abit_id:
+            return o["order_no"], False
+    orders["counter"] += 1
+    order_no = orders["counter"]
+    user_orders.append({"abit_id": abit_id, "order_no": order_no})
+    save_orders(orders)
+    return order_no, True
+
+
+def total_orders() -> int:
+    return sum(len(v) for v in orders["items"].values())
+
 admin_state: dict[int, str] = {}
 pending_broadcast: dict[int, dict] = {}
 user_calc_state: dict[int, dict] = {}
@@ -224,6 +262,7 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
     """Pastdagi doimiy menyu — har doim ko'rinib turadi."""
     return ReplyKeyboardMarkup(
         [
+            ["📝 Mandatga buyurtma"],
             ["🧮 Ball kalkulyatori"],
             ["💰 Superkontrakt", "🔔 Eslatma"],
             ["ℹ️ Yordam"],
@@ -238,6 +277,7 @@ async def show_main_menu(chat_id: int, bot, edit_message=None, user_name: str = 
     button_text = "🔕 Eslatmani o'chirish" if is_subscribed else "🔔 Eslatmani yoqish"
     keyboard = InlineKeyboardMarkup(
         [
+            [InlineKeyboardButton("📝  Yakuniy mandatga buyurtma", callback_data="start_order")],
             [InlineKeyboardButton("🧮  Ball kalkulyatori", callback_data="start_calc")],
             [InlineKeyboardButton("💰  Superkontrakt hisoblash", callback_data="start_super")],
             [InlineKeyboardButton(button_text, callback_data="toggle_sub")],
@@ -252,6 +292,8 @@ async def show_main_menu(chat_id: int, bot, edit_message=None, user_name: str = 
         "🎓 <b>MANDAT 2026</b>\n"
         "<i>Abituriyentlar uchun yordamchi</i>\n"
         "━━━━━━━━━━━━━━━\n\n"
+        "📝 <b>Yakuniy mandatga buyurtma</b>\n"
+        "<i>ID raqamingizni qoldiring — natija chiqishi bilan xabar olasiz</i>\n\n"
         "🧮 <b>Ball kalkulyatori</b>\n"
         "<i>Ballingizga mos yo'nalishlarni bir zumda aniqlang</i>\n\n"
         "💰 <b>Superkontrakt hisoblash</b>\n"
@@ -382,6 +424,7 @@ async def calc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if action == "calc_cancel":
         user_calc_state.pop(chat_id, None)
         user_super_state.pop(chat_id, None)
+        user_order_state.pop(chat_id, None)
         await query.answer()
         await safe_edit_text(query.message, "◀️ Bosh menyuga qaytdingiz.")
         await show_main_menu(chat_id, context.bot)
@@ -590,6 +633,32 @@ def format_super_calc(farq: float, bazaviy: float | None = None) -> str:
     return body
 
 
+# ===========================================================
+# YAKUNIY MANDATGA BUYURTMA (faqat ID saqlanadi)
+# ===========================================================
+user_order_state: dict[int, bool] = {}
+
+ORDER_PROMPT = (
+    "📝 <b>YAKUNIY MANDATGA BUYURTMA</b>\n"
+    "━━━━━━━━━━━━━━━\n\n"
+    "Mandat natijalari hali e'lon qilinmagan.\n\n"
+    "Abituriyent <b>ID raqamingizni</b> yuboring — natijalar e'lon qilinishi "
+    "bilan bot sizga darhol xabar beradi va natijani ko'rish havolasini yuboradi.\n\n"
+    "🆔 <i>ID raqami qayd varaqangizning yuqorisida yozilgan (7 xonali son)</i>\n\n"
+    "<i>Masalan: 1234567</i>\n\n"
+    "📌 <i>Bot faqat ID raqamini saqlaydi — boshqa hech qanday shaxsiy "
+    "ma'lumot so'ralmaydi va saqlanmaydi.</i>"
+)
+
+
+async def start_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    chat_id = query.message.chat_id
+    user_order_state[chat_id] = True
+    await query.answer()
+    await query.message.reply_text(ORDER_PROMPT, parse_mode=ParseMode.HTML)
+
+
 async def count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ADMIN_ID:
         return
@@ -682,6 +751,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             query.message,
             f"📊 <b>Statistika</b>\n\n"
             f"Obunachilar: {len(subscribers)}\n"
+            f"Mandat buyurtmalari: {total_orders()} ta\n"
             f"Majburiy kanallar: {len(force_channels)}\n"
             f"Yo'nalishlar: {len(programs)} (balli: {scored})\n"
             f"Fan majmualari: {len(get_all_fans())}",
@@ -961,6 +1031,11 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
         )
         return
 
+    if raw_text == "📝 Mandatga buyurtma":
+        user_order_state[user_id] = True
+        await message.reply_text(ORDER_PROMPT, parse_mode=ParseMode.HTML)
+        return
+
     if raw_text == "💰 Superkontrakt":
         user_super_state[user_id] = {"stage": "awaiting_farq"}
         await message.reply_text(
@@ -981,9 +1056,14 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text(
             "ℹ️ <b>YORDAM</b>\n"
             "━━━━━━━━━━━━━━━\n\n"
+            "📝 <b>Mandatga buyurtma</b>\n"
+            "Abituriyent ID raqamingizni qoldirasiz. Natijalar e'lon qilinishi "
+            "bilan bot sizga xabar va havola yuboradi.\n\n"
             "🧮 <b>Ball kalkulyatori</b>\n"
             "Fanlar majmuangizni tanlab, ballingizni kiritasiz — sizga mos "
             "yo'nalishlar ro'yxati chiqadi.\n\n"
+            "💰 <b>Superkontrakt</b>\n"
+            "Ball yetmagan bo'lsa, to'lov necha barobar bo'lishini hisoblaydi.\n\n"
             "🔔 <b>Eslatma</b>\n"
             "Yoqib qo'ysangiz, mandat natijalari e'lon qilinishi bilan bot sizga "
             "avtomatik xabar yuboradi.\n\n"
@@ -1024,6 +1104,45 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
             reply_markup=again_kb,
+        )
+        return
+
+    # --- Yakuniy mandatga buyurtma (ID qabul qilish) ---
+    if user_order_state.get(user_id):
+        abit_id = re.sub(r"\D", "", raw_text)
+        if not abit_id or not (5 <= len(abit_id) <= 9):
+            await message.reply_text(
+                "⚠️ Iltimos, faqat abituriyent ID raqamini yuboring (5–9 xonali son).\n\n"
+                "<i>Masalan: 1234567</i>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        order_no, is_new = add_order(user_id, abit_id)
+        # Buyurtma bergan foydalanuvchini avtomatik eslatmaga ham qo'shamiz
+        if user_id not in subscribers:
+            subscribers.add(user_id)
+            save_json_set(SUBS_FILE, subscribers)
+
+        user_order_state.pop(user_id, None)
+
+        holat = "qabul qilindi" if is_new else "allaqachon ro'yxatda"
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("➕  Yana ID qo'shish", callback_data="start_order")],
+                [InlineKeyboardButton("◀️  Bosh menyu", callback_data="calc_cancel")],
+            ]
+        )
+        await message.reply_text(
+            "✅ <b>Buyurtma " + holat + "!</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            f"🆔 Abituriyent ID: <b>{abit_id}</b>\n"
+            f"📄 Buyurtma raqami: <b>{order_no}</b>\n\n"
+            "🔔 Yakuniy mandat natijalari e'lon qilinishi bilan bot sizga "
+            "<b>darhol xabar beradi</b> va natijani ko'rish havolasini yuboradi.\n\n"
+            "<i>Bir nechta abituriyent uchun ketma-ket yuborishingiz mumkin.</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb,
         )
         return
 
@@ -1241,6 +1360,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(check_subscription, pattern="^check_sub$"))
     app.add_handler(CallbackQueryHandler(toggle_subscription, pattern="^toggle_sub$"))
     app.add_handler(CallbackQueryHandler(start_calc, pattern="^start_calc$"))
+    app.add_handler(CallbackQueryHandler(start_order, pattern="^start_order$"))
     app.add_handler(CallbackQueryHandler(start_super, pattern="^start_super$"))
     app.add_handler(CallbackQueryHandler(calc_callback, pattern="^(calcfan:|calc_cancel)"))
     app.add_handler(CallbackQueryHandler(
