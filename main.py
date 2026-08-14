@@ -1419,6 +1419,7 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
 async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     message = update.message
+    raw_text = (message.text or "").strip()
 
     state = admin_state.get(ADMIN_ID)
     if not state:
