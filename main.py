@@ -1084,6 +1084,56 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    if action == "bc_add_button":
+        if not pending_broadcast.get(ADMIN_ID):
+            await query.answer("⚠️ Xabar topilmadi", show_alert=True)
+            return
+        admin_state[ADMIN_ID] = "awaiting_bc_buttons"
+        await query.answer()
+        await safe_edit_text(
+            query.message,
+            "🔘 <b>TUGMA QO'SHISH</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "Har bir tugmani <b>yangi qatorga</b> shunday yozing:\n\n"
+            "<code>Tugma matni - havola</code>\n\n"
+            "<b>Masalan:</b>\n"
+            "<code>🎯 Natijani ko'rish - https://mandat.uzbmb.uz\n"
+            "🤖 Botga o'tish - @MANDAT_AIBOT\n"
+            "📢 Kanalimiz - https://t.me/kanal</code>\n\n"
+            "━━━━━━━━━━━━━━━\n"
+            "📌 Ko'pi bilan 10 ta tugma.\n"
+            "❌ Bekor qilish uchun /admin yozing.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if action == "bc_clear_buttons":
+        data = pending_broadcast.get(ADMIN_ID)
+        if data:
+            data.pop("buttons", None)
+            pending_broadcast[ADMIN_ID] = data
+        await query.answer("🗑 Tugmalar olib tashlandi")
+        confirm_kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🔘  Tugma qo'shish", callback_data="bc_add_button")],
+                [InlineKeyboardButton("✅  Ha, yuborilsin", callback_data="confirm_broadcast")],
+                [InlineKeyboardButton("❌  Bekor qilish", callback_data="cancel_broadcast")],
+            ]
+        )
+        await safe_edit_text(
+            query.message,
+            "📢 <b>XABARNI TASDIQLASH</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            f"👥 Qabul qiluvchilar: <b>{len(subscribers)}</b> kishi\n"
+            "🔘 Tugmalar: <b>yo'q</b>\n"
+            f"⏱ Taxminiy vaqt: <b>~{max(1, round(len(subscribers) / 25 / 60))} daqiqa</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "Yuborishni tasdiqlaysizmi?",
+            parse_mode=ParseMode.HTML,
+            reply_markup=confirm_kb,
+        )
+        return
+
     if action == "confirm_broadcast":
         await query.answer()
         data = pending_broadcast.pop(ADMIN_ID, None)
@@ -1105,6 +1155,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             context.bot,
             from_chat_id=data["from_chat_id"],
             message_id=data["message_id"],
+            buttons=data.get("buttons"),
             progress_message=query.message,
         )
 
@@ -1502,8 +1553,20 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         else:
             tur = "📝 Matn"
 
+        # Bot xabarni O'ZI qayta yuboradi — foydalanuvchi aynan shuni ko'radi
+        await message.reply_text("👁 <b>Foydalanuvchilar shunday ko'radi:</b>", parse_mode=ParseMode.HTML)
+        try:
+            await context.bot.copy_message(
+                chat_id=message.chat_id,
+                from_chat_id=message.chat_id,
+                message_id=message.message_id,
+            )
+        except Exception as e:
+            logger.warning(f"Ko'rib chiqish yuborilmadi: {e}")
+
         confirm_kb = InlineKeyboardMarkup(
             [
+                [InlineKeyboardButton("🔘  Tugma qo'shish", callback_data="bc_add_button")],
                 [InlineKeyboardButton("✅  Ha, yuborilsin", callback_data="confirm_broadcast")],
                 [InlineKeyboardButton("❌  Bekor qilish", callback_data="cancel_broadcast")],
             ]
@@ -1511,9 +1574,69 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await message.reply_text(
             "📢 <b>XABARNI TASDIQLASH</b>\n"
             "━━━━━━━━━━━━━━━\n\n"
-            "☝️ Yuqoridagi xabar aynan shu ko'rinishda yuboriladi.\n\n"
             f"📄 Turi: <b>{tur}</b>\n"
             f"👥 Qabul qiluvchilar: <b>{len(subscribers)}</b> kishi\n"
+            f"⏱ Taxminiy vaqt: <b>~{max(1, round(len(subscribers) / 25 / 60))} daqiqa</b>\n"
+            "🔘 Tugmalar: <b>yo'q</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "Yuborishni tasdiqlaysizmi?",
+            parse_mode=ParseMode.HTML,
+            reply_markup=confirm_kb,
+        )
+        return
+
+    if state == "awaiting_bc_buttons":
+        data = pending_broadcast.get(ADMIN_ID)
+        if not data:
+            admin_state.pop(ADMIN_ID, None)
+            await message.reply_text("⚠️ Xabar topilmadi. Qaytadan boshlang: /admin")
+            return
+
+        tugmalar = parse_buttons(raw_text)
+        if not tugmalar:
+            await message.reply_text(
+                "⚠️ <b>Format noto'g'ri.</b>\n\n"
+                "Har bir tugmani yangi qatorga shunday yozing:\n\n"
+                "<code>Tugma matni - https://havola</code>\n\n"
+                "<b>Masalan:</b>\n"
+                "<code>🎯 Natijani ko'rish - https://mandat.uzbmb.uz\n"
+                "📢 Kanalimiz - https://t.me/kanal</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        data["buttons"] = tugmalar
+        pending_broadcast[ADMIN_ID] = data
+        admin_state.pop(ADMIN_ID, None)
+
+        # Xabarni tugmalari bilan birga qayta ko'rsatamiz
+        await message.reply_text(
+            f"👁 <b>Foydalanuvchilar shunday ko'radi</b> ({len(tugmalar)} ta tugma bilan):",
+            parse_mode=ParseMode.HTML,
+        )
+        try:
+            await context.bot.copy_message(
+                chat_id=message.chat_id,
+                from_chat_id=data["from_chat_id"],
+                message_id=data["message_id"],
+                reply_markup=build_broadcast_keyboard(tugmalar),
+            )
+        except Exception as e:
+            logger.warning(f"Ko'rib chiqish yuborilmadi: {e}")
+
+        confirm_kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🔘  Tugmalarni o'zgartirish", callback_data="bc_add_button")],
+                [InlineKeyboardButton("🗑  Tugmalarni olib tashlash", callback_data="bc_clear_buttons")],
+                [InlineKeyboardButton("✅  Ha, yuborilsin", callback_data="confirm_broadcast")],
+                [InlineKeyboardButton("❌  Bekor qilish", callback_data="cancel_broadcast")],
+            ]
+        )
+        await message.reply_text(
+            "📢 <b>XABARNI TASDIQLASH</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            f"👥 Qabul qiluvchilar: <b>{len(subscribers)}</b> kishi\n"
+            f"🔘 Tugmalar: <b>{len(tugmalar)} ta</b>\n"
             f"⏱ Taxminiy vaqt: <b>~{max(1, round(len(subscribers) / 25 / 60))} daqiqa</b>\n"
             "━━━━━━━━━━━━━━━\n\n"
             "Yuborishni tasdiqlaysizmi?",
@@ -1523,9 +1646,49 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
 
-async def send_to_all(bot, from_chat_id: int, message_id: int, progress_message=None):
+def parse_buttons(text: str) -> list[tuple[str, str]]:
+    """'Matn - https://havola' ko'rinishidagi qatorlarni tugmaga aylantiradi."""
+    natija = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        # " - " yoki " | " ajratgichini qidiramiz
+        ajratgich = None
+        for sep in (" - ", " | ", " — ", "|"):
+            if sep in line:
+                ajratgich = sep
+                break
+        if not ajratgich:
+            continue
+        matn, _, havola = line.partition(ajratgich)
+        matn, havola = matn.strip(), havola.strip()
+        if not matn or not havola:
+            continue
+        # Havolani to'g'rilaymiz
+        if havola.startswith("@"):
+            havola = f"https://t.me/{havola[1:]}"
+        elif havola.startswith("t.me/"):
+            havola = f"https://{havola}"
+        elif not havola.startswith(("http://", "https://")):
+            continue
+        natija.append((matn, havola))
+        if len(natija) >= 10:
+            break
+    return natija
+
+
+def build_broadcast_keyboard(buttons: list) -> InlineKeyboardMarkup | None:
+    """Saqlangan tugmalardan klaviatura yasaydi."""
+    if not buttons:
+        return None
+    rows = [[InlineKeyboardButton(matn, url=havola)] for matn, havola in buttons]
+    return InlineKeyboardMarkup(rows)
+
+
+async def send_to_all(bot, from_chat_id: int, message_id: int, buttons=None, progress_message=None):
     """Xabarni barcha obunachilarga nusxa qilib yuboradi.
-    copy_message ishlatiladi — formatlash, media va tugmalar saqlanadi,
+    copy_message ishlatiladi — formatlash, media va emoji to'liq saqlanadi,
     va "forwarded from" yozuvi chiqmaydi."""
     sent, blocked_count, error_count = 0, 0, 0
     blocked: list[int] = []
@@ -1533,6 +1696,7 @@ async def send_to_all(bot, from_chat_id: int, message_id: int, progress_message=
     total = len(targets)
     BATCH = 25
     started = time.time()
+    keyboard = build_broadcast_keyboard(buttons) if buttons else None
 
     async def send_one(chat_id: int) -> str:
         try:
@@ -1540,6 +1704,7 @@ async def send_to_all(bot, from_chat_id: int, message_id: int, progress_message=
                 chat_id=chat_id,
                 from_chat_id=from_chat_id,
                 message_id=message_id,
+                reply_markup=keyboard,
             )
             return "ok"
         except Forbidden:
@@ -1624,7 +1789,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(calc_callback, pattern="^(calcfan:|calc_cancel)"))
     app.add_handler(CallbackQueryHandler(
         admin_callback,
-        pattern="^(admin_|delch:|ad_|confirm_broadcast|cancel_broadcast)"
+        pattern="^(admin_|delch:|ad_|bc_|confirm_broadcast|cancel_broadcast)"
     ))
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.VIDEO) & ~filters.COMMAND, universal_input_handler))
     app.add_error_handler(global_error_handler)
