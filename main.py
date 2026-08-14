@@ -201,17 +201,31 @@ def register_ad_view(ad_id: str) -> None:
         save_ads(ads)
 
 
-def append_ad(text: str, place: str) -> str:
-    """place: 'start' yoki 'result'"""
-    key = "show_on_start" if place == "start" else "show_on_result"
-    if not ads.get(key):
-        return text
+async def send_ad(bot, chat_id: int, place: str = "all") -> None:
+    """Reklamani ALOHIDA xabar sifatida yuboradi.
+    Har bir bo'limdan keyin chaqiriladi (bosh menyu, kalkulyator natijasi,
+    superkontrakt, buyurtma, yordam)."""
+    if place == "start" and not ads.get("show_on_start", True):
+        return
+    if place == "result" and not ads.get("show_on_result", True):
+        return
+
     result = get_active_ad()
     if not result:
-        return text
+        return
     ad_id, ad_text = result
     register_ad_view(ad_id)
-    return f"{text}\n\n➖➖➖➖➖\n{ad_text}"
+
+    try:
+        await bot.send_message(
+            chat_id,
+            ad_text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=False,
+        )
+    except Exception as e:
+        # Reklama yuborilmasa ham asosiy ish buzilmasligi kerak
+        logger.warning(f"Reklama yuborilmadi {chat_id}: {e}")
 
 
 # ---------------------------------------------------------
@@ -262,6 +276,7 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
     """Pastdagi doimiy menyu — har doim ko'rinib turadi."""
     return ReplyKeyboardMarkup(
         [
+            ["🎯 Mandat natijasini ko'rish"],
             ["📝 Mandatga buyurtma"],
             ["🧮 Ball kalkulyatori"],
             ["💰 Superkontrakt", "🔔 Eslatma"],
@@ -272,11 +287,38 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+# ---------------------------------------------------------
+# Mandat natijasini ko'rish (rasmiy saytlarga yo'naltirish)
+# ---------------------------------------------------------
+NATIJA_TEXT = (
+    "🎯 <b>MANDAT NATIJASINI KO'RISH</b>\n"
+    "━━━━━━━━━━━━━━━\n\n"
+    "Natijangizni rasmiy saytlarning birida ko'rishingiz mumkin:\n\n"
+    "1️⃣ <b>my.uzbmb.uz</b>\n"
+    "<i>Pasport seriyasi va raqami + JSHSHIR orqali</i>\n\n"
+    "2️⃣ <b>mandat.uzbmb.uz</b>\n"
+    "<i>Abituriyent ID raqami orqali</i>\n\n"
+    "━━━━━━━━━━━━━━━\n"
+    "👇 Kerakli saytni tanlang"
+)
+
+
+def natija_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("1️⃣  my.uzbmb.uz  🔗", url="https://my.uzbmb.uz")],
+            [InlineKeyboardButton("2️⃣  mandat.uzbmb.uz  🔗", url="https://mandat.uzbmb.uz")],
+            [InlineKeyboardButton("◀️  Bosh menyu", callback_data="calc_cancel")],
+        ]
+    )
+
+
 async def show_main_menu(chat_id: int, bot, edit_message=None, user_name: str = "") -> None:
     is_subscribed = chat_id in subscribers
     button_text = "🔕 Eslatmani o'chirish" if is_subscribed else "🔔 Eslatmani yoqish"
     keyboard = InlineKeyboardMarkup(
         [
+            [InlineKeyboardButton("🎯  Mandat natijasini ko'rish", callback_data="show_natija")],
             [InlineKeyboardButton("📝  Yakuniy mandatga buyurtma", callback_data="start_order")],
             [InlineKeyboardButton("🧮  Ball kalkulyatori", callback_data="start_calc")],
             [InlineKeyboardButton("💰  Superkontrakt hisoblash", callback_data="start_super")],
@@ -292,6 +334,8 @@ async def show_main_menu(chat_id: int, bot, edit_message=None, user_name: str = 
         "🎓 <b>MANDAT 2026</b>\n"
         "<i>Abituriyentlar uchun yordamchi</i>\n"
         "━━━━━━━━━━━━━━━\n\n"
+        "🎯 <b>Mandat natijasini ko'rish</b>\n"
+        "<i>Rasmiy saytlarga to'g'ridan-to'g'ri o'tish</i>\n\n"
         "📝 <b>Yakuniy mandatga buyurtma</b>\n"
         "<i>ID raqamingizni qoldiring — natija chiqishi bilan xabar olasiz</i>\n\n"
         "🧮 <b>Ball kalkulyatori</b>\n"
@@ -304,12 +348,14 @@ async def show_main_menu(chat_id: int, bot, edit_message=None, user_name: str = 
         "━━━━━━━━━━━━━━━\n"
         "👇 Quyidagi tugmalardan birini tanlang"
     )
-    text = append_ad(text, "start")
 
     if edit_message:
         await safe_edit_text(edit_message, text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
     else:
         await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+    # Reklama alohida xabar sifatida
+    await send_ad(bot, chat_id, "start")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -554,7 +600,7 @@ def format_calc_result(score: float, fan: str) -> str:
         "📌 <i>2025/2026 ko'rsatkichlari asosida taxminiy hisob. "
         "Rasmiy ma'lumot: mandat.uzbmb.uz</i>"
     )
-    return append_ad(body, "result")
+    return body
 
 
 # ===========================================================
@@ -659,6 +705,20 @@ async def start_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await query.message.reply_text(ORDER_PROMPT, parse_mode=ParseMode.HTML)
 
 
+async def show_natija(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mandat natijasini ko'rish — rasmiy saytlarga havolalar."""
+    query = update.callback_query
+    chat_id = query.message.chat_id
+    await query.answer()
+    await query.message.reply_text(
+        NATIJA_TEXT,
+        parse_mode=ParseMode.HTML,
+        reply_markup=natija_keyboard(),
+        disable_web_page_preview=True,
+    )
+    await send_ad(context.bot, chat_id, "result")
+
+
 async def count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ADMIN_ID:
         return
@@ -709,13 +769,21 @@ def ads_summary_text() -> str:
     active = sum(1 for a in ads["items"].values() if a.get("active"))
     views = sum(a.get("views", 0) for a in ads["items"].values())
     return (
-        "📣 <b>Reklama bo'limi</b>\n\n"
-        f"📊 Jami reklamalar: {total} ta\n"
-        f"✅ Faol: {active} ta\n"
-        f"👁 Jami ko'rishlar: {views} ta\n\n"
-        "⚙️ Sozlamalar:\n"
-        f"🚀 Start'da: {'✅ Yoniq' if ads.get('show_on_start') else '❌ O`chiq'}\n"
-        f"🧮 Natijada: {'✅ Yoniq' if ads.get('show_on_result') else '❌ O`chiq'}"
+        "📣 <b>REKLAMA BO'LIMI</b>\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        f"📊 Jami reklamalar: <b>{total}</b> ta\n"
+        f"✅ Faol: <b>{active}</b> ta\n"
+        f"👁 Jami ko'rishlar: <b>{views}</b> ta\n\n"
+        "⚙️ <b>Sozlamalar:</b>\n"
+        f"🚀 Bosh menyuda: {'✅ Yoniq' if ads.get('show_on_start') else '❌ O`chiq'}\n"
+        f"🧮 Bo'limlardan keyin: {'✅ Yoniq' if ads.get('show_on_result') else '❌ O`chiq'}\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "📌 <i>Reklama alohida xabar sifatida yuboriladi — bosh menyu, "
+        "natija ko'rish, kalkulyator, superkontrakt, buyurtma va yordam "
+        "bo'limlaridan keyin.</i>\n\n"
+        "✨ <i>Matnda HTML formatlash ishlatishingiz mumkin: "
+        "&lt;b&gt;qalin&lt;/b&gt;, &lt;i&gt;qiya&lt;/i&gt;, "
+        "&lt;a href=\"havola\"&gt;matn&lt;/a&gt;</i>"
     )
 
 
@@ -1062,6 +1130,16 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
     raw_text = (message.text or "").strip()
 
     # --- Pastdagi doimiy klaviatura tugmalari ---
+    if raw_text == "🎯 Mandat natijasini ko'rish":
+        await message.reply_text(
+            NATIJA_TEXT,
+            parse_mode=ParseMode.HTML,
+            reply_markup=natija_keyboard(),
+            disable_web_page_preview=True,
+        )
+        await send_ad(context.bot, user_id, "result")
+        return
+
     if raw_text == "🧮 Ball kalkulyatori":
         fans = get_all_fans()
         if not fans:
@@ -1101,6 +1179,9 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text(
             "ℹ️ <b>YORDAM</b>\n"
             "━━━━━━━━━━━━━━━\n\n"
+            "🎯 <b>Mandat natijasini ko'rish</b>\n"
+            "Rasmiy saytlarga to'g'ridan-to'g'ri o'tasiz: my.uzbmb.uz (pasport + "
+            "JSHSHIR) yoki mandat.uzbmb.uz (ID raqami).\n\n"
             "📝 <b>Mandatga buyurtma</b>\n"
             "Abituriyent ID raqamingizni qoldirasiz. Natijalar e'lon qilinishi "
             "bilan bot sizga xabar va havola yuboradi.\n\n"
@@ -1113,12 +1194,12 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
             "Yoqib qo'ysangiz, mandat natijalari e'lon qilinishi bilan bot sizga "
             "avtomatik xabar yuboradi.\n\n"
             "━━━━━━━━━━━━━━━\n"
-            "📌 Ma'lumotlar 2025/2026 ko'rsatkichlari asosida taxminiy hisoblanadi.\n"
-            "Rasmiy manba: mandat.uzbmb.uz\n\n"
+            "📌 Ma'lumotlar 2025/2026 ko'rsatkichlari asosida taxminiy hisoblanadi.\n\n"
             "🔄 Botni qayta ishga tushirish: /start",
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
+        await send_ad(context.bot, user_id, "result")
         return
 
     # --- Ball kalkulyatori ---
@@ -1150,6 +1231,7 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
             disable_web_page_preview=True,
             reply_markup=again_kb,
         )
+        await send_ad(context.bot, user_id, "result")
         return
 
     # --- Yakuniy mandatga buyurtma (ID qabul qilish) ---
@@ -1189,6 +1271,7 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
             parse_mode=ParseMode.HTML,
             reply_markup=kb,
         )
+        await send_ad(context.bot, user_id, "result")
         return
 
     # --- Superkontrakt hisoblagichi ---
@@ -1217,6 +1300,7 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
                         [[InlineKeyboardButton("◀️  Bosh menyu", callback_data="calc_cancel")]]
                     ),
                 )
+                await send_ad(context.bot, user_id, "result")
                 return
             user_super_state[user_id] = {"stage": "awaiting_bazaviy", "farq": son}
             await message.reply_text(
@@ -1244,6 +1328,7 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
                     ]
                 ),
             )
+            await send_ad(context.bot, user_id, "result")
             return
 
     if user_id != ADMIN_ID:
@@ -1474,6 +1559,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(toggle_subscription, pattern="^toggle_sub$"))
     app.add_handler(CallbackQueryHandler(start_calc, pattern="^start_calc$"))
     app.add_handler(CallbackQueryHandler(start_order, pattern="^start_order$"))
+    app.add_handler(CallbackQueryHandler(show_natija, pattern="^show_natija$"))
     app.add_handler(CallbackQueryHandler(start_super, pattern="^start_super$"))
     app.add_handler(CallbackQueryHandler(calc_callback, pattern="^(calcfan:|calc_cancel)"))
     app.add_handler(CallbackQueryHandler(
