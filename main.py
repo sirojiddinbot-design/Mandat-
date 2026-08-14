@@ -983,9 +983,16 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.answer()
         await safe_edit_text(
             query.message,
-            "📢 Yubormoqchi bo'lgan xabaringizni yuboring:\n"
-            "— Matn, rasm yoki video\n\n"
-            "Bekor qilish uchun /admin yozing.",
+            "📢 <b>XABAR YUBORISH</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            f"👥 Qabul qiluvchilar: <b>{len(subscribers)}</b> kishi\n\n"
+            "Yubormoqchi bo'lgan xabaringizni shu yerga yuboring:\n\n"
+            "📝 Matn  ·  🖼 Rasm  ·  🎬 Video\n"
+            "🎞 GIF  ·  📎 Fayl  ·  🎤 Ovozli xabar\n\n"
+            "✨ <i>Formatlash (qalin matn, havolalar, emoji) va izohlar "
+            "to'liq saqlanadi — xabar aynan siz yozgandek yetib boradi.</i>\n\n"
+            "❌ Bekor qilish uchun /admin yozing.",
+            parse_mode=ParseMode.HTML,
         )
         return
 
@@ -993,18 +1000,56 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.answer()
         data = pending_broadcast.pop(ADMIN_ID, None)
         if not data:
-            await safe_edit_text(query.message, "Xabar topilmadi.")
+            await safe_edit_text(query.message, "⚠️ Xabar topilmadi. Qaytadan urinib ko'ring.")
             return
-        await safe_edit_text(query.message, "⏳ Yuborilmoqda...")
-        sent, failed = await send_to_all(context.bot, **data)
-        await safe_edit_text(query.message, f"✅ Yuborildi: {sent}\n❌ Xato: {failed}")
+
+        await safe_edit_text(
+            query.message,
+            "📤 <b>YUBORILMOQDA...</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            f"{progress_bar(0)}  0%\n\n"
+            f"👥 Jami: {len(subscribers)}\n\n"
+            "<i>Iltimos, kuting...</i>",
+            parse_mode=ParseMode.HTML,
+        )
+
+        natija = await send_to_all(
+            context.bot,
+            from_chat_id=data["from_chat_id"],
+            message_id=data["message_id"],
+            progress_message=query.message,
+        )
+
+        daqiqa, soniya = divmod(natija["seconds"], 60)
+        vaqt = f"{daqiqa} daq {soniya} son" if daqiqa else f"{soniya} soniya"
+        foiz = round(natija["sent"] / natija["total"] * 100) if natija["total"] else 0
+
+        hisobot = (
+            "✅ <b>YUBORISH TUGADI</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            f"✅ Yetkazildi: <b>{natija['sent']}</b> ({foiz}%)\n"
+        )
+        if natija["blocked"]:
+            hisobot += f"🚫 Bloklagan: <b>{natija['blocked']}</b> <i>(ro'yxatdan o'chirildi)</i>\n"
+        if natija["errors"]:
+            hisobot += f"⚠️ Xatolik: <b>{natija['errors']}</b>\n"
+        hisobot += (
+            f"\n⏱ Sarflangan vaqt: {vaqt}\n"
+            f"👥 Qolgan obunachilar: <b>{len(subscribers)}</b>"
+        )
+
+        await safe_edit_text(
+            query.message, hisobot, parse_mode=ParseMode.HTML, reply_markup=admin_menu_keyboard()
+        )
         return
 
     if action == "cancel_broadcast":
         pending_broadcast.pop(ADMIN_ID, None)
         admin_state.pop(ADMIN_ID, None)
         await query.answer("Bekor qilindi")
-        await safe_edit_text(query.message, "Bekor qilindi.", reply_markup=admin_menu_keyboard())
+        await safe_edit_text(
+            query.message, "❌ Yuborish bekor qilindi.", reply_markup=admin_menu_keyboard()
+        )
         return
 
 
@@ -1275,75 +1320,143 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
         return
 
     if state == "awaiting_broadcast":
-        data = {}
-        if message.photo:
-            data["photo_id"] = message.photo[-1].file_id
-            data["text"] = message.caption or ""
-        elif message.video:
-            data["video_id"] = message.video.file_id
-            data["text"] = message.caption or ""
-        elif message.text:
-            data["text"] = message.text
-        else:
-            await message.reply_text("Matn, rasm yoki video yuboring.")
+        # Xabarni "nusxa" usulida saqlaymiz — shunda formatlash (qalin matn,
+        # havolalar), media turi va tugmalar to'liq saqlanadi.
+        supported = (
+            message.text or message.photo or message.video or message.document
+            or message.audio or message.animation or message.voice or message.sticker
+        )
+        if not supported:
+            await message.reply_text(
+                "⚠️ Bu turdagi xabarni yubora olmayman.\n\n"
+                "Matn, rasm, video, GIF, fayl, ovozli xabar yoki stiker yuboring."
+            )
             return
 
-        pending_broadcast[ADMIN_ID] = data
+        pending_broadcast[ADMIN_ID] = {
+            "from_chat_id": message.chat_id,
+            "message_id": message.message_id,
+        }
         admin_state.pop(ADMIN_ID, None)
-        preview = data.get("text", "")[:200] or "(izohsiz media)"
+
+        # Xabar turini aniqlaymiz
+        if message.photo:
+            tur = "🖼 Rasm"
+        elif message.video:
+            tur = "🎬 Video"
+        elif message.animation:
+            tur = "🎞 GIF"
+        elif message.document:
+            tur = "📎 Fayl"
+        elif message.audio:
+            tur = "🎵 Audio"
+        elif message.voice:
+            tur = "🎤 Ovozli xabar"
+        elif message.sticker:
+            tur = "🩷 Stiker"
+        else:
+            tur = "📝 Matn"
+
         confirm_kb = InlineKeyboardMarkup(
-            [[
-                InlineKeyboardButton("✅ Yuborish", callback_data="confirm_broadcast"),
-                InlineKeyboardButton("❌ Bekor", callback_data="cancel_broadcast"),
-            ]]
+            [
+                [InlineKeyboardButton("✅  Ha, yuborilsin", callback_data="confirm_broadcast")],
+                [InlineKeyboardButton("❌  Bekor qilish", callback_data="cancel_broadcast")],
+            ]
         )
         await message.reply_text(
-            f"Quyidagi xabar {len(subscribers)} kishiga yuboriladi:\n\n{preview}\n\nTasdiqlaysizmi?",
+            "📢 <b>XABARNI TASDIQLASH</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "☝️ Yuqoridagi xabar aynan shu ko'rinishda yuboriladi.\n\n"
+            f"📄 Turi: <b>{tur}</b>\n"
+            f"👥 Qabul qiluvchilar: <b>{len(subscribers)}</b> kishi\n"
+            f"⏱ Taxminiy vaqt: <b>~{max(1, round(len(subscribers) / 25 / 60))} daqiqa</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "Yuborishni tasdiqlaysizmi?",
+            parse_mode=ParseMode.HTML,
             reply_markup=confirm_kb,
         )
         return
 
 
-async def send_to_all(bot, text: str = "", photo_id: str | None = None, video_id: str | None = None):
-    """Xabarni barcha obunachilarga yuboradi.
-    Telegram sekundiga ~30 ta xabarga ruxsat beradi, shuning uchun
-    kichik guruhlarga bo'lib, orasida qisqa pauza bilan yuboramiz —
-    bu ham tez, ham bloklanmaydi."""
-    sent, failed = 0, 0
+async def send_to_all(bot, from_chat_id: int, message_id: int, progress_message=None):
+    """Xabarni barcha obunachilarga nusxa qilib yuboradi.
+    copy_message ishlatiladi — formatlash, media va tugmalar saqlanadi,
+    va "forwarded from" yozuvi chiqmaydi."""
+    sent, blocked_count, error_count = 0, 0, 0
     blocked: list[int] = []
     targets = list(subscribers)
+    total = len(targets)
     BATCH = 25
+    started = time.time()
 
     async def send_one(chat_id: int) -> str:
         try:
-            if photo_id:
-                await bot.send_photo(chat_id=chat_id, photo=photo_id, caption=text or None)
-            elif video_id:
-                await bot.send_video(chat_id=chat_id, video=video_id, caption=text or None)
-            else:
-                await bot.send_message(chat_id=chat_id, text=text)
+            await bot.copy_message(
+                chat_id=chat_id,
+                from_chat_id=from_chat_id,
+                message_id=message_id,
+            )
             return "ok"
         except Forbidden:
             blocked.append(chat_id)
             return "blocked"
+        except BadRequest as e:
+            msg = str(e).lower()
+            if "chat not found" in msg or "user is deactivated" in msg:
+                blocked.append(chat_id)
+                return "blocked"
+            logger.warning(f"Yuborilmadi {chat_id}: {e}")
+            return "error"
         except Exception as e:
             logger.warning(f"Yuborilmadi {chat_id}: {e}")
             return "error"
 
-    for i in range(0, len(targets), BATCH):
+    for i in range(0, total, BATCH):
         chunk = targets[i:i + BATCH]
         results = await asyncio.gather(*(send_one(cid) for cid in chunk))
         sent += results.count("ok")
-        failed += len(results) - results.count("ok")
+        blocked_count += results.count("blocked")
+        error_count += results.count("error")
+
+        # Har ~500 kishida admin'ga jarayonni ko'rsatamiz
+        done = i + len(chunk)
+        if progress_message and (done % 500 < BATCH) and done < total:
+            foiz = round(done / total * 100)
+            try:
+                await safe_edit_text(
+                    progress_message,
+                    "📤 <b>YUBORILMOQDA...</b>\n"
+                    "━━━━━━━━━━━━━━━\n\n"
+                    f"{progress_bar(foiz)}  {foiz}%\n\n"
+                    f"✅ Yuborildi: <b>{sent}</b>\n"
+                    f"👥 Jami: {total}\n\n"
+                    "<i>Iltimos, kuting...</i>",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+
         await asyncio.sleep(1)  # Telegram limitiga rioya qilish
 
-    # Botni bloklagan foydalanuvchilarni ro'yxatdan bir marta o'chiramiz
+    # Botni bloklaganlarni ro'yxatdan bir marta o'chiramiz
     if blocked:
         for cid in blocked:
             subscribers.discard(cid)
         save_json_set(SUBS_FILE, subscribers)
 
-    return sent, failed
+    davomiylik = int(time.time() - started)
+    return {
+        "sent": sent,
+        "blocked": blocked_count,
+        "errors": error_count,
+        "total": total,
+        "seconds": davomiylik,
+    }
+
+
+def progress_bar(foiz: int, uzunlik: int = 10) -> str:
+    to_ldi = round(foiz / 100 * uzunlik)
+    return "█" * to_ldi + "░" * (uzunlik - to_ldi)
 
 
 def main() -> None:
