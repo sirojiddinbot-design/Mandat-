@@ -223,6 +223,13 @@ async def send_ad(bot, chat_id: int, place: str = "all") -> None:
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=False,
         )
+    except BadRequest:
+        # HTML buzuq bo'lsa, oddiy matn sifatida yuboramiz — reklama
+        # baribir yetib borsin
+        try:
+            await bot.send_message(chat_id, ad_text, disable_web_page_preview=False)
+        except Exception as e:
+            logger.warning(f"Reklama yuborilmadi {chat_id}: {e}")
     except Exception as e:
         # Reklama yuborilmasa ham asosiy ish buzilmasligi kerak
         logger.warning(f"Reklama yuborilmadi {chat_id}: {e}")
@@ -790,7 +797,13 @@ def ads_summary_text() -> str:
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ADMIN_ID:
         return
+    # Barcha kutilayotgan holatlarni tozalaymiz — shunda admin panelga
+    # kirganda oldingi tugallanmagan amallar xalaqit bermaydi
     admin_state.pop(ADMIN_ID, None)
+    pending_broadcast.pop(ADMIN_ID, None)
+    user_calc_state.pop(ADMIN_ID, None)
+    user_super_state.pop(ADMIN_ID, None)
+    user_order_state.pop(ADMIN_ID, None)
     await update.message.reply_text(
         "🛠 <b>Admin panel</b>\n\nKerakli bo'limni tanlang:",
         parse_mode=ParseMode.HTML,
@@ -984,9 +997,16 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.answer()
         await safe_edit_text(
             query.message,
-            "➕ Yangi reklama matnini yuboring.\n\n"
-            "Havola qo'shsangiz ham bo'ladi.\n"
-            "Bekor qilish uchun /admin yozing.",
+            "➕ <b>YANGI REKLAMA</b>\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "Reklama matnini shu yerga yuboring.\n\n"
+            "✨ <b>Formatlash:</b> matnni belgilab, Telegram'ning o'z formatlash "
+            "menyusidan foydalaning (qalin, qiya, havola). Teglarni qo'lda "
+            "yozish shart emas.\n\n"
+            "🔗 Havola qo'shsangiz, oldindan ko'rish (preview) bilan chiroyli chiqadi.\n\n"
+            "☝️ Yuborganingizdan so'ng qanday ko'rinishini darhol ko'rasiz.\n\n"
+            "❌ Bekor qilish uchun /admin yozing.",
+            parse_mode=ParseMode.HTML,
         )
         return
 
@@ -1128,6 +1148,14 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
     user_id = update.effective_user.id
     message = update.message
     raw_text = (message.text or "").strip()
+
+    # ⚠️ MUHIM: agar admin biror amalni kutayotgan bo'lsa (reklama qo'shish,
+    # kanal qo'shish, xabar yuborish...), u BIRINCHI navbatda ishlanadi.
+    # Aks holda admin yuborgan matn foydalanuvchi oqimiga (masalan ID
+    # kutayotgan buyurtma bo'limiga) tushib qolishi mumkin.
+    if user_id == ADMIN_ID and admin_state.get(ADMIN_ID):
+        await handle_admin_input(update, context)
+        return
 
     # --- Pastdagi doimiy klaviatura tugmalari ---
     if raw_text == "🎯 Mandat natijasini ko'rish":
@@ -1331,8 +1359,15 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
             await send_ad(context.bot, user_id, "result")
             return
 
-    if user_id != ADMIN_ID:
-        return
+    return
+
+
+# ---------------------------------------------------------
+# Admin kiritishlarini alohida ishlash
+# ---------------------------------------------------------
+async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    message = update.message
 
     state = admin_state.get(ADMIN_ID)
     if not state:
@@ -1377,14 +1412,39 @@ async def universal_input_handler(update: Update, context: ContextTypes.DEFAULT_
         return
 
     if state == "awaiting_ad_text":
-        new_text = (message.text or "").strip()
+        # message.text_html — Telegram'da siz qo'ygan formatlashni (qalin, qiya,
+        # havola) tayyor HTML holida beradi. Ya'ni teglarni qo'lda yozish shart emas:
+        # matnni belgilab, Telegram'ning o'z formatlash menyusidan foydalanasiz.
+        new_text = (message.text_html or message.text or "").strip()
         if not new_text:
-            await message.reply_text("Bo'sh matn. Qaytadan yuboring.")
+            await message.reply_text("⚠️ Bo'sh matn. Qaytadan yuboring.")
             return
+
+        # Matn to'g'ri yuborilishini oldindan tekshiramiz
+        try:
+            preview = await message.reply_text(
+                new_text, parse_mode=ParseMode.HTML, disable_web_page_preview=False
+            )
+        except BadRequest as e:
+            await message.reply_text(
+                "⚠️ <b>Matnda formatlash xatosi bor.</b>\n\n"
+                f"<code>{str(e)[:200]}</code>\n\n"
+                "Agar matnda <code>&lt;</code> yoki <code>&gt;</code> belgilari bo'lsa, "
+                "ularni olib tashlang.\n\n"
+                "Qaytadan yuboring yoki /admin bilan bekor qiling.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
         ads["items"][uuid.uuid4().hex[:8]] = {"text": new_text, "active": True, "views": 0}
         save_ads(ads)
         admin_state.pop(ADMIN_ID, None)
-        await message.reply_text("✅ Reklama qo'shildi va faollashtirildi.", reply_markup=ads_menu_keyboard())
+        await message.reply_text(
+            "✅ <b>Reklama qo'shildi va faollashtirildi!</b>\n\n"
+            "☝️ Yuqorida foydalanuvchilarga aynan shu ko'rinishda ko'rinadi.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=ads_menu_keyboard(),
+        )
         return
 
     if state == "awaiting_import":
