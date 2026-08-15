@@ -241,7 +241,8 @@ async def send_ad(bot, chat_id: int, place: str = "all") -> None:
 # Foydalanuvchi a'zoligi natijasini vaqtincha eslab qolamiz,
 # shunda har tugma bosilganda Telegram'ga qayta so'rov ketmaydi.
 _membership_cache: dict[int, tuple[float, list[str]]] = {}
-MEMBERSHIP_CACHE_SECONDS = 300  # 5 daqiqa
+MEMBERSHIP_CACHE_SECONDS = 1800  # 30 daqiqa — so'rovlarni kamaytirish uchun
+MEMBERSHIP_CACHE_MAX = 20000  # Keshning xotirada cheksiz o'smasligi uchun
 
 
 async def get_missing_channels(bot, user_id: int, use_cache: bool = True) -> list[str]:
@@ -259,12 +260,31 @@ async def get_missing_channels(bot, user_id: int, use_cache: bool = True) -> lis
         try:
             member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
             return channel if member.status in ("left", "kicked") else None
+        except Forbidden:
+            # Bot kanalda admin emas — tekshira olmaymiz, foydalanuvchini
+            # bekorga to'sib qo'ymaymiz
+            logger.warning(f"{channel}: bot admin emas")
+            return None
         except Exception as e:
+            # Tarmoq xatosi bo'lsa ham foydalanuvchini to'smaymiz —
+            # aks holda bot ishlamay qolgandek tuyuladi
             logger.warning(f"{channel} tekshirilmadi: {e}")
-            return channel
+            return None
 
-    results = await asyncio.gather(*(check(c) for c in force_channels))
+    try:
+        results = await asyncio.gather(*(check(c) for c in force_channels))
+    except Exception as e:
+        logger.warning(f"Obuna tekshiruvi xatosi: {e}")
+        return []
+
     missing = [c for c in results if c]
+
+    # Kesh haddan tashqari o'sib ketmasligi uchun eskilarini tozalaymiz
+    if len(_membership_cache) > MEMBERSHIP_CACHE_MAX:
+        eski = [k for k, v in _membership_cache.items()
+                if now - v[0] > MEMBERSHIP_CACHE_SECONDS]
+        for k in eski:
+            _membership_cache.pop(k, None)
 
     _membership_cache[user_id] = (now, missing)
     return missing
@@ -320,7 +340,8 @@ def natija_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-async def show_main_menu(chat_id: int, bot, edit_message=None, user_name: str = "") -> None:
+async def show_main_menu(chat_id: int, bot, edit_message=None, user_name: str = "",
+                         with_keyboard: bool = False) -> None:
     is_subscribed = chat_id in subscribers
     button_text = "🔕 Eslatmani o'chirish" if is_subscribed else "🔔 Eslatmani yoqish"
     keyboard = InlineKeyboardMarkup(
@@ -359,6 +380,15 @@ async def show_main_menu(chat_id: int, bot, edit_message=None, user_name: str = 
     if edit_message:
         await safe_edit_text(edit_message, text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
     else:
+        # Klaviatura kerak bo'lsa, avval uni menyu matni bilan birga o'rnatamiz.
+        # Inline tugmalar va pastki klaviatura bitta xabarda bo'la olmaydi,
+        # shuning uchun klaviatura menyudan oldin, qisqa xabar bilan ketadi.
+        if with_keyboard:
+            await bot.send_message(
+                chat_id,
+                "⌨️ Pastdagi tugmalar orqali tez kirishingiz mumkin 👇",
+                reply_markup=main_reply_keyboard(),
+            )
         await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
     # Reklama alohida xabar sifatida
@@ -382,13 +412,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-    # Pastdagi doimiy klaviaturani bir marta o'rnatamiz
-    await context.bot.send_message(
-        chat_id,
-        "⌨️ Pastdagi tugmalar orqali tez kirishingiz mumkin.",
-        reply_markup=main_reply_keyboard(),
-    )
-    await show_main_menu(chat_id, context.bot, user_name=user_name)
+    # Klaviatura menyu xabarining o'zi bilan birga o'rnatiladi —
+    # ortiqcha xabar yuborilmaydi (bu Telegram'ga so'rovni kamaytiradi)
+    await show_main_menu(chat_id, context.bot, user_name=user_name, with_keyboard=True)
 
 
 async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -402,13 +428,9 @@ async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await safe_edit_markup(query.message, reply_markup=build_subscription_keyboard(missing))
         return
     await query.answer("✅ Rahmat! Xush kelibsiz")
-    await context.bot.send_message(
-        chat_id,
-        "⌨️ Pastdagi tugmalar orqali tez kirishingiz mumkin.",
-        reply_markup=main_reply_keyboard(),
-    )
-    await show_main_menu(chat_id, context.bot, edit_message=query.message,
-                         user_name=query.from_user.first_name or "")
+    await show_main_menu(chat_id, context.bot,
+                         user_name=query.from_user.first_name or "",
+                         with_keyboard=True)
 
 
 async def toggle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1126,7 +1148,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "━━━━━━━━━━━━━━━\n\n"
             f"👥 Qabul qiluvchilar: <b>{len(subscribers)}</b> kishi\n"
             "🔘 Tugmalar: <b>yo'q</b>\n"
-            f"⏱ Taxminiy vaqt: <b>~{max(1, round(len(subscribers) / 25 / 60))} daqiqa</b>\n"
+            f"⏱ Taxminiy vaqt: <b>~{max(1, round(len(subscribers) / 20 / 60))} daqiqa</b>\n"
             "━━━━━━━━━━━━━━━\n\n"
             "Yuborishni tasdiqlaysizmi?",
             parse_mode=ParseMode.HTML,
@@ -1577,7 +1599,7 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "━━━━━━━━━━━━━━━\n\n"
             f"📄 Turi: <b>{tur}</b>\n"
             f"👥 Qabul qiluvchilar: <b>{len(subscribers)}</b> kishi\n"
-            f"⏱ Taxminiy vaqt: <b>~{max(1, round(len(subscribers) / 25 / 60))} daqiqa</b>\n"
+            f"⏱ Taxminiy vaqt: <b>~{max(1, round(len(subscribers) / 20 / 60))} daqiqa</b>\n"
             "🔘 Tugmalar: <b>yo'q</b>\n"
             "━━━━━━━━━━━━━━━\n\n"
             "Yuborishni tasdiqlaysizmi?",
@@ -1638,7 +1660,7 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "━━━━━━━━━━━━━━━\n\n"
             f"👥 Qabul qiluvchilar: <b>{len(subscribers)}</b> kishi\n"
             f"🔘 Tugmalar: <b>{len(tugmalar)} ta</b>\n"
-            f"⏱ Taxminiy vaqt: <b>~{max(1, round(len(subscribers) / 25 / 60))} daqiqa</b>\n"
+            f"⏱ Taxminiy vaqt: <b>~{max(1, round(len(subscribers) / 20 / 60))} daqiqa</b>\n"
             "━━━━━━━━━━━━━━━\n\n"
             "Yuborishni tasdiqlaysizmi?",
             parse_mode=ParseMode.HTML,
@@ -1695,7 +1717,7 @@ async def send_to_all(bot, from_chat_id: int, message_id: int, buttons=None, pro
     blocked: list[int] = []
     targets = list(subscribers)
     total = len(targets)
-    BATCH = 25
+    BATCH = 20  # Telegram limitidan pastroq — xavfsizroq
     started = time.time()
     keyboard = build_broadcast_keyboard(buttons) if buttons else None
 
@@ -1774,7 +1796,17 @@ def main() -> None:
     app = (
         Application.builder()
         .token(TOKEN)
-        .concurrent_updates(True)  # Bir vaqtda bir nechta foydalanuvchiga xizmat qiladi
+        # Bir vaqtda bir nechta foydalanuvchiga xizmat qiladi
+        .concurrent_updates(True)
+        # Ko'p foydalanuvchi bo'lganda ulanishlar navbati to'lib qolmasligi uchun
+        .connection_pool_size(512)
+        .pool_timeout(60)
+        .connect_timeout(30)
+        .read_timeout(30)
+        .write_timeout(30)
+        .get_updates_pool_timeout(60)
+        .get_updates_connect_timeout(30)
+        .get_updates_read_timeout(30)
         .build()
     )
 
